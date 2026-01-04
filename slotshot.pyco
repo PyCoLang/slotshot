@@ -1,0 +1,2466 @@
+# SlotShot - A Tetris-inspired shooter game for C64 (Optimized Version)
+# Controls: Joystick Port 2, W/S, or Up/Down to move cannon
+#           Fire button or SPACE to shoot
+# Fill the gaps to make columns disappear!
+#
+# OPTIMIZATION FEATURES:
+# - Color RAM only rendering (screen chars filled once with CHAR_BLOCK)
+# - IRQ-driven sprite movement for smooth cannon and bullet animation
+# - Shared ZP variables between main loop and IRQ handler
+
+# Include RLE decompressor, and music player
+include("rle")
+include("musicplayer")
+# Include image and music data
+include("slotshot_image_rle")
+include("slotshot_music")
+
+# =============================================================================
+# MEMORY LAYOUT - VIC BANK 3 ($C000-$FFFF)
+# =============================================================================
+# Using Bank 3 because program is ~30KB (ends ~$7EB2) and stack grows UPWARD.
+# Bank 3 gives stack 16KB headroom ($7EB2-$BFFF) before hitting VIC memory.
+#
+# Bank 3 Layout:
+#   $C000-$C0FF: Sprite data (256 bytes, 4 sprites)
+#   $C100-$C3A8: Column buffer + pool (680 bytes)
+#   $C400-$C7FF: Screen RAM (1KB)
+#   $C800-$CFFF: Charset (2KB) - shared by game AND title menu
+#   $D000-$DFFF: I/O (not usable for graphics!)
+#   $E000-$FFFF: Title bitmap ONLY (8KB)
+SCREEN = 0xC400           # Screen RAM in bank 3
+CHARSET_RAM = 0xC800      # Custom charset location in bank 3 (shared with title)
+SPRITE_DATA_ADDR = 0xC000 # Sprite data at start of bank 3
+SPRITE_POINTER_BASE = 0xC7F8  # Sprite pointers (SCREEN + $3F8)
+SPRITE_BLOCK = 0          # Block 0 within bank
+
+# Color RAM (always at $D800, not banked)
+COLOR = 0xD800
+
+# CIA1 registers
+CIA1_ICR = 0xDC0D
+
+# Work buffer memory in Bank 3 free area
+COLUMN_BUFFER_ADDR = 0xC100   # 40 bytes for column blit buffer
+COLUMN_POOL_ADDR = 0xC128     # 640 bytes for pre-generated column patterns (ends at $C3A8)
+
+# Column pool configuration
+# IMPORTANT: Use power-of-2 sizes to avoid modulo bias and enable fast bitmask!
+COLUMN_POOL_SIZE = 64         # Number of pre-generated column patterns (64 * 10 = 640 bytes)
+COLUMN_POOL_MASK = 63         # Bitmask for fast random selection (0x3F)
+MAX_HOLES = 4                 # Maximum holes per column (1-4 random)
+MAX_HOLES_MASK = 3            # Bitmask for holes (0-3, then +1 = 1-4)
+
+# Random state in safe user ZP area (16-bit for Galois LFSR)
+RANDOM_STATE_ADDR = 0xFD       # $FD-$FE for 16-bit state
+RANDOM_COUNTER_ADDR = 0xFB     # $FB for counter (extra randomness)
+
+# =============================================================================
+# VIC REGISTERS
+# =============================================================================
+# Screen colors
+BORDER = 0xD020
+BACKGROUND = 0xD021
+
+# VIC control registers
+VIC_CTRL1 = 0xD011        # Control register 1 (bit 6 = ECM, bit 7 = raster MSB)
+VIC_CTRL2 = 0xD016        # Control register 2 (bit 0-2 = X scroll, bit 3 = 40/38 col mode)
+VIC_MEMPTR = 0xD018       # Memory control register (screen/charset pointers)
+VIC_RASTER = 0xD012       # Raster line register
+
+# ECM background color registers
+VIC_BG1 = 0xD022          # Background color 1 (for chars 64-127)
+VIC_BG2 = 0xD023          # Background color 2 (for chars 128-191)
+VIC_BG3 = 0xD024          # Background color 3 (for chars 192-255)
+
+# VIC interrupt registers
+VIC_IRQ_STATUS = 0xD019   # Interrupt status/acknowledge
+VIC_IRQ_ENABLE = 0xD01A   # Interrupt enable
+VIC_DEN = 0x10            # Display Enable bit (bit 4 of $D011)
+
+# =============================================================================
+# SPRITE REGISTERS
+# =============================================================================
+SPRITE_X = 0xD000         # Sprite 0-7 X positions (D000, D002, D004...)
+SPRITE_Y = 0xD001         # Sprite 0-7 Y positions (D001, D003, D005...)
+SPRITE_X_MSB = 0xD010     # X position MSB for all sprites
+SPRITE_ENABLE = 0xD015    # Sprite enable register
+SPRITE_EXPAND_Y = 0xD017  # Sprite Y expansion
+SPRITE_EXPAND_X = 0xD01D  # Sprite X expansion
+SPRITE_PRIORITY = 0xD01B  # Sprite priority (0=sprite in front)
+SPRITE_MULTICOLOR = 0xD01C # Sprite multicolor mode
+SPRITE_MC1 = 0xD025       # Sprite multicolor 1 (shared)
+SPRITE_MC2 = 0xD026       # Sprite multicolor 2 (shared)
+SPRITE_COLOR_0 = 0xD027   # Sprite 0 color (base address, +1 for each sprite)
+
+# =============================================================================
+# CIA REGISTERS
+# =============================================================================
+CIA2_PRA = 0xDD00         # CIA2 Port A - VIC bank selection
+
+# =============================================================================
+# CPU REGISTERS
+# =============================================================================
+CPU_PORT = 0x01           # CPU port (bit 0 = RAM/ROM banking)
+
+# =============================================================================
+# ROM ACCESS ADDRESSES (when I/O disabled)
+# =============================================================================
+CHAR_ROM = 0xD000         # Character ROM (when I/O disabled)
+
+# =============================================================================
+# SCREEN DIMENSIONS
+# =============================================================================
+SCREEN_WIDTH = 40
+SCREEN_HEIGHT = 25
+
+# Row offset lookup table - pre-calculated y * 40 for fast screen access
+# This is a preprocessor constant - gets substituted into tuple declarations
+ROW_OFFSET_DATA = (
+    0, 40, 80, 120, 160, 200, 240, 280, 320, 360,
+    400, 440, 480, 520, 560, 600, 640, 680, 720, 760,
+    800, 840, 880, 920, 960
+)
+
+# Play area: 2x2 character blocks
+TITLE_ROWS = 2            # Rows 0-1: title bar
+STATUS_ROWS = 3           # Rows 22-24: status bar
+PLAY_ROWS = 20            # Rows 2-21: play area (10 blocks high)
+PLAY_TOP = 2              # First play row
+
+# Grid dimensions (in 2x2 blocks)
+GRID_WIDTH = 20           # 20 block columns (col 0 is under cannon!)
+GRID_HEIGHT = 10          # 10 block rows
+CANNON_COL = 0            # Cannon at leftmost position
+
+# Block size
+BLOCK_WIDTH = 2           # Characters per block
+BLOCK_HEIGHT = 2          # Characters per block
+
+# =============================================================================
+# SPRITE COORDINATES
+# =============================================================================
+SPRITE_X_OFFSET = 24      # Add to screen X to get sprite X
+SPRITE_Y_OFFSET = 50      # Add to screen Y to get sprite Y
+CANNON_SPRITE_X = 24      # Cannon sprite X position (fixed, at left edge)
+
+# =============================================================================
+# GAME PHYSICS
+# =============================================================================
+BULLET_SPEED = 8          # Bullet speed (pixels per frame)
+
+# =============================================================================
+# CHARACTER CODES (screen codes)
+# =============================================================================
+# ECM mode: only chars 0-63 visible, bits 6-7 select background color
+CHAR_SPACE = 32           # Empty space
+
+# Block corner characters (custom chars 60-63) - rounded corners with 1px border
+# Using 60-63 (< = > ?) to avoid overwriting letters A-Z (1-26)
+CHAR_BLOCK_TL = 60        # Top-left corner
+CHAR_BLOCK_TR = 61        # Top-right corner
+CHAR_BLOCK_BL = 62        # Bottom-left corner
+CHAR_BLOCK_BR = 63        # Bottom-right corner
+
+# Progress bar character (custom char 59) - thin line at bottom of character
+CHAR_PROGRESS = 59        # Progress bar segment
+
+# Progress bar configuration
+PROGRESS_BAR_WIDTH = 40   # Full screen width
+PROGRESS_BAR_ROW = 22     # Status bar first row
+PROGRESS_BAR_START = 0    # Starting X position (left edge)
+
+# ECM background select offsets (add to char code)
+BG_PLAY = 0               # Background 0 ($D021) - play area (black)
+BG_TITLE = 64             # Background 1 ($D022) - title bar (blue)
+BG_STATUS = 128           # Background 2 ($D023) - status bar (dark grey)
+# BG_GAMEOVER = 192         # Background 3 ($D024)
+
+# =============================================================================
+# KEY CODES (PETSCII)
+# =============================================================================
+KEY_UP = 145
+KEY_DOWN = 17
+KEY_W = 87
+KEY_S = 83
+KEY_W_LOWER = 119
+KEY_S_LOWER = 115
+KEY_N = 78
+KEY_N_LOWER = 110
+KEY_SPACE = 32
+KEY_RETURN = 13
+
+# =============================================================================
+# JOYSTICK PORT 2 (directly injects keys into keyboard buffer)
+# =============================================================================
+JOY_PORT = 0xDC00             # CIA1 Port A - directly read in IRQ
+
+# Joystick bit masks (directly defined here, active LOW = 0 means pressed)
+JOY_UP_MASK = 0x01
+JOY_DOWN_MASK = 0x02
+JOY_FIRE_MASK = 0x10
+
+# Keyboard buffer addresses (Kernal locations)
+KBD_BUFFER = 0x0277           # 10-byte keyboard buffer
+KBD_COUNT = 0xC6              # Number of chars in buffer (NDX)
+
+# Jiffy clock addresses (for elapsed time display)
+JIFFY_HI_ADDR = 0xA1          # Jiffy clock middle byte (big-endian!)
+JIFFY_LO_ADDR = 0xA2          # Jiffy clock low byte (changes at 60Hz)
+
+# Joystick repeat timing (in CIA1 ticks, 60Hz)
+JOY_INITIAL_DELAY = 12        # ~0.24s before repeat starts
+JOY_REPEAT_RATE = 4           # ~0.08s between repeats (faster for games)
+
+# =============================================================================
+# GAME TIMING
+# =============================================================================
+INITIAL_COLUMNS = 6         # Number of columns to spawn at game start
+INITIAL_SCORE = 9           # Starting score (each shot costs 1 point)
+
+# Raster position for sprite updates
+IRQ_RASTER_BOTTOM = 226         # Sprite updates (timing not critical)
+
+# =============================================================================
+# COLORS (C64 palette)
+# =============================================================================
+BLACK = 0
+WHITE = 1
+RED = 2
+CYAN = 3
+PURPLE = 4
+GREEN = 5
+BLUE = 6
+YELLOW = 7
+ORANGE = 8
+BROWN = 9
+LIGHT_RED = 10
+DARK_GREY = 11
+GREY = 12
+LIGHT_GREEN = 13
+LIGHT_BLUE = 14
+LIGHT_GREY = 15
+
+# =============================================================================
+# COLOR_RAM CONFIGURATION
+# =============================================================================
+COLOR_SCREEN_BG = BLACK
+COLOR_SCREEN_BORDER = DARK_GREY
+COLOR_TITLE_BG = BLUE
+COLOR_TITLE_TEXT = WHITE
+COLOR_STATUS_BG = DARK_GREY
+COLOR_STATUS_TEXT = LIGHT_GREY
+COLOR_STATUS_TEXT_HIGHLIGHT = WHITE
+COLOR_CANNON = YELLOW
+COLOR_BULLET = WHITE
+COLOR_SPARKLE_1 = GREY        # Sparkle phase 1 (darker)
+COLOR_SPARKLE_2 = LIGHT_GREY  # Sparkle phase 2 (brighter)
+COLOR_GAME_OVER_FLASH = RED
+
+# Dying block animation colors - plays through these colors before disappearing
+# Last color should be BLACK (block gone). len() determines phase count!
+DYING_COLORS = (GREY, LIGHT_GREY, GREY, LIGHT_GREY, GREY, WHITE, BLACK)
+
+# Block colors for random selection (preprocessor constant for tuple)
+# 8 colors = power-of-2 for fast bitmask selection (no modulo bias!)
+# Note: YELLOW excluded (cannon color), using LIGHT_RED instead
+BLOCK_COLORS_DATA = (RED, CYAN, PURPLE, GREEN, ORANGE, LIGHT_GREEN, LIGHT_BLUE, LIGHT_RED)
+BLOCK_COLORS_MASK = 7         # Bitmask for 8 colors (0-7)
+
+
+# Commodore 64 rainbow colors (from the classic C64 logo)
+# Red -> Orange -> Yellow -> Green -> Blue
+# 40 chars total: 8 + 8 + 8 + 8 + 8 = 40 (full screen width, equal distribution)
+COMMODORE_RAINBOW_DATA = (
+    RED, RED, RED, RED, RED, RED, RED, RED,
+    ORANGE, ORANGE, ORANGE, ORANGE, ORANGE, ORANGE, ORANGE, ORANGE,
+    YELLOW, YELLOW, YELLOW, YELLOW, YELLOW, YELLOW, YELLOW, YELLOW,
+    GREEN, GREEN, GREEN, GREEN, GREEN, GREEN, GREEN, GREEN,
+    BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE
+)
+
+# =============================================================================
+# TITLE SCREEN CONFIGURATION (Raster Split Bitmap/Text)
+# =============================================================================
+# Uses VIC Bank 3 ($C000-$FFFF) - same as game, but bitmap mode
+# In bitmap mode: screen RAM holds colors, bitmap holds pixels
+BITMAP_ADDR = 0xE000        # Bitmap data (shares location with charset in text mode)
+
+# Raster split lines (visible area ~51-250, each char row = 8 lines)
+# 25 rows total, bottom 4 rows (rows 21-24) in text mode for menu
+# Row 21 starts at: 51 + (21 * 8) = 219
+TITLE_RASTER_TO_BITMAP = 15       # Upper border - switch to bitmap
+TITLE_RASTER_BEFORE_SWITCH = 187  # Disable CIA1 before mode switch
+TITLE_RASTER_TO_TEXT = 209        # Switch to text mode
+
+# VIC memory pointer values (for $D018) - Bank 3
+# Bank 3: base $C000, offsets relative to $C000
+# Screen at $C400: offset $0400 → bits 7-4 = %0001
+# Charset at $C800: offset $0800 → bits 3-1 = %001 (shared by game AND title)
+# Bitmap at $E000: offset $2000 → bit 3 = 1
+# Note: In Bank 3, there's NO character ROM hole - ROM copied to $C800 (CHARSET_RAM)
+GAME_MEMPTR = 0x12                # %0001 0010 - Screen $C400, Charset $C800
+TITLE_MEMPTR_TEXT = 0x12          # %0001 0010 - Screen $C400, Charset $C800 (same!)
+TITLE_MEMPTR_BITMAP = 0x18        # %0001 1000 - Screen $C400, Bitmap $E000
+
+# VIC Control bits
+TITLE_VIC_BITMAP_MODE = 0x20      # $D011 bit 5
+TITLE_VIC_MULTICOLOR = 0x10       # $D016 bit 4
+TITLE_VIC_ECM_MODE = 0x40         # $D011 bit 6 (must be OFF for bitmap!)
+
+# Menu configuration
+MENU_ITEM_COUNT = 4               # Play, Credits, Story
+MENU_ROW_START = 21               # First menu row (screen row)
+
+# Menu colors
+COLOR_MENU_NORMAL = LIGHT_BLUE
+COLOR_MENU_SELECTED = LIGHT_GREY
+COLOR_MENU_BG = BLACK
+
+# Disk loading - single temp buffer for sequential load/decompress
+# $C000-$CFFF is free RAM (4KB), plenty for largest RLE file (~3KB)
+# Size is read from RLE header after loading (first 2 bytes at DISK_TEMP_ADDR)
+# Using $8000 as temp buffer - safe during title load when stack is small
+# After loading, this area can be used by stack if game needs deep recursion
+DISK_TEMP_ADDR = 0x8000       # Temp buffer for all RLE loads (4KB available)
+
+# =============================================================================
+# LEVEL SYSTEM CONFIGURATION
+# =============================================================================
+# Column speed for each level (lower = faster)
+# len(LEVEL_SPEEDS) determines max level! Index 0 = level 1, etc.
+LEVEL_SPEEDS = (207, 184, 161, 138, 115, 104, 93, 84, 76, 69)
+
+# Points needed to reach each level (cumulative)
+# Must have len(LEVEL_SPEEDS) - 1 entries (thresholds for level 2 to max)
+LEVEL_THRESHOLDS = (100, 500, 1000, 1500, 2000, 2500, 3000, 4000, 5000)
+
+# Custom block characters (60-63) with rounded corners and 1px border
+# Each character is 8 bytes, total 32 bytes for 4 characters
+CUSTOM_CHARS_DATA = (
+    # Character 60: Top-left corner
+    0x00, 0x3F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F,
+    # Character 61: Top-right corner
+    0x00, 0xFC, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE,
+    # Character 62: Bottom-left corner
+    0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x3F, 0x00,
+    # Character 63: Bottom-right corner
+    0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFC, 0x00
+)
+
+# Progress bar character (59) - 2px thin line near top of character
+# 1px margin at top, then 2px line, rest empty
+# This creates a subtle progress indicator that doesn't dominate the status bar
+PROGRESS_CHAR_DATA = (
+    0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+)
+
+# =============================================================================
+# CANNON SPRITE DATA (Multicolor, color: $0C)
+# =============================================================================
+# Sprite 0: Cannon ready (before firing) - filled barrel
+CANNON_SPRITE_READY = (
+    0xaa, 0xaa, 0x00, 0x99, 0x98, 0x00, 0x90, 0xc0,
+    0x00, 0xa3, 0x00, 0x00, 0xa0, 0xc0, 0x00, 0x90,
+    0x30, 0x00, 0x90, 0xc0, 0x00, 0xa3, 0x00, 0x00,
+    0xa0, 0xc0, 0x00, 0x90, 0x30, 0x00, 0x90, 0xc0,
+    0x00, 0xa3, 0x00, 0x00, 0xa0, 0xc0, 0x00, 0x90,
+    0x30, 0x00, 0x99, 0x98, 0x00, 0xaa, 0xaa, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8c,
+)
+
+# Sprite 1: Cannon fired (after firing) - empty barrel
+CANNON_SPRITE_FIRED = (
+    0xaa, 0xaa, 0x00, 0x99, 0x98, 0x00, 0x90, 0x00,
+    0x00, 0xa0, 0x00, 0x00, 0xa0, 0x00, 0x00, 0x90,
+    0x00, 0x00, 0x90, 0x00, 0x00, 0xa0, 0x00, 0x00,
+    0xa0, 0x00, 0x00, 0x90, 0x00, 0x00, 0x90, 0x00,
+    0x00, 0xa0, 0x00, 0x00, 0xa0, 0x00, 0x00, 0x90,
+    0x00, 0x00, 0x99, 0x98, 0x00, 0xaa, 0xaa, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8c,
+)
+
+# Sprite 2: Bullet - 16x16 rounded block (same shape as game blocks)
+BULLET_SPRITE = (
+    0x00, 0x00, 0x00, 0x3F, 0xFC, 0x00, 0x7F, 0xFE,
+    0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F,
+    0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00,
+    0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE,
+    0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F,
+    0xFE, 0x00, 0x3F, 0xFC, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+)
+
+# =============================================================================
+# SPARKLE SPRITE DATA (Hires, for shimmer effect)
+# =============================================================================
+# Single checkerboard pattern - color fades instead of pattern changes
+# Based on BULLET_SPRITE rounded shape, combined with checkerboard pattern
+# Hires: 0=transparent, 1=sprite color
+# Each sprite is 64 bytes (21 rows × 3 bytes + 1 padding)
+
+# Sparkle sprite (~50% density) - full checkerboard in rounded shape
+# Bullet shape (0x3F/0x7F, 0xFC/0xFE) AND checkerboard (0x55/0xAA alternating)
+SPARKLE_SPRITE_DENSE = (
+    0x00, 0x00, 0x00,  # Row 0 - empty (rounded corner)
+    0x15, 0x54, 0x00,  # Row 1 - 0x3F & 0x55 = 0x15, 0xFC & 0x54 = 0x54
+    0x2A, 0xA8, 0x00,  # Row 2 - 0x7F & 0xAA = 0x2A, 0xFE & 0xA8 = 0xA8
+    0x55, 0x54, 0x00,  # Row 3 - 0x7F & 0x55 = 0x55, 0xFE & 0x54 = 0x54
+    0x2A, 0xA8, 0x00,  # Row 4
+    0x55, 0x54, 0x00,  # Row 5
+    0x2A, 0xA8, 0x00,  # Row 6
+    0x55, 0x54, 0x00,  # Row 7
+    0x2A, 0xA8, 0x00,  # Row 8
+    0x55, 0x54, 0x00,  # Row 9
+    0x2A, 0xA8, 0x00,  # Row 10
+    0x55, 0x54, 0x00,  # Row 11
+    0x2A, 0xA8, 0x00,  # Row 12
+    0x55, 0x54, 0x00,  # Row 13
+    0x2A, 0xA8, 0x00,  # Row 14 - 0x3F & 0xAA = 0x2A, 0xFC & 0xA8 = 0xA8
+    0x00, 0x00, 0x00,  # Row 15 - empty (rounded corner)
+    0x00, 0x00, 0x00,  # Row 16
+    0x00, 0x00, 0x00,  # Row 17
+    0x00, 0x00, 0x00,  # Row 18
+    0x00, 0x00, 0x00,  # Row 19
+    0x00, 0x00, 0x00,  # Row 20
+    0x00,              # Padding
+)
+
+# Title half-characters pixel data
+# These are split versions of S, L, O, T, H for 4px vertical shift
+# OVERLAP technique: row 3 appears in BOTH halves for seamless connection!
+# This makes letters 8px tall (vs original 7px) - classic C64 big-font trick
+# TOP half: rows 0-3 at bytes 4-7 (4 empty + 4 letter)
+# BOTTOM half: rows 3-6 at bytes 0-3 (4 letter + 4 empty) - row 3 duplicated!
+# Based on C64 ROM: S=3C 66 60 3C 06 66 3C 00, L=60 60 60 60 60 60 7E 00, etc.
+HALF_CHARS_DATA = (
+    # S_TOP (27):    00 00 00 00 3C 66 60 3C (rows 0-3)
+    0x00, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x60, 0x38,
+    # S_BOTTOM (28): 3C 06 66 3C 00 00 00 00 (rows 3-6, row 3 overlaps!)
+    0x00,0x0C, 0x06, 0x66, 0x3C, 0x00, 0x00, 0x00,
+    # L_TOP (29):    00 00 00 00 60 60 60 60 (rows 0-3)
+    0x00, 0x00, 0x00, 0x00, 0x60, 0x60, 0x60, 0x60,
+    # L_BOTTOM (30): 60 60 60 7E 00 00 00 00 (rows 3-6, row 3 overlaps!)
+    0x00,0x60, 0x60, 0x60, 0x7E, 0x00, 0x00, 0x00,
+    # O_TOP (31):    00 00 00 00 3C 66 66 66 (rows 0-3)
+    0x00, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x66, 0x66,
+    # O_BOTTOM (33): 66 66 66 3C 00 00 00 00 (rows 3-6, row 3 overlaps!)
+    0x00,0x66, 0x66, 0x66, 0x3C, 0x00, 0x00, 0x00,
+    # T_TOP (34):    00 00 00 00 7E 18 18 18 (rows 0-3)
+    0x00, 0x00, 0x00, 0x00, 0x7E, 0x18, 0x18, 0x18,
+    # T_BOTTOM (35): 18 18 18 18 00 00 00 00 (rows 3-6, row 3 overlaps!)
+    0x00,0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00,
+    # H_TOP (36):    00 00 00 00 66 66 66 7E (rows 0-3)
+    0x00, 0x00, 0x00, 0x00, 0x66, 0x66, 0x66, 0x7E,
+    # H_BOTTOM (37): 7E 66 66 66 00 00 00 00 (rows 3-6, row 3 overlaps!)
+    0x00,0x7E, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00
+)
+
+# Screen codes for "SLOTSHOT" title using half-characters
+# Row 0 (top row): top halves (empty top + letter top at bottom)
+TITLE_ROW0 = (27, 29, 31, 35, 27, 37, 31, 35)  # S_T, L_T, O_T, T_T, S_T, H_T, O_T, T_T
+# Row 1 (bottom row): bottom halves (letter bottom at top + empty bottom)
+TITLE_ROW1 = (28, 30, 34, 36, 28, 38, 34, 36)  # S_B, L_B, O_B, T_B, S_B, H_B, O_B, T_B
+
+# =============================================================================
+# SHARED ZERO PAGE VARIABLES (IRQ <-> Main loop communication)
+# PyCo uses $02-$21, user available: $22-$56 (53 bytes)
+# =============================================================================
+# Bullet state variables
+ZP_BULLET_ACTIVE = 0x22    # byte: 0=inactive, 1=active
+ZP_BULLET_X = 0x23         # word: bullet X position (16-bit, 2 bytes)
+ZP_BULLET_Y = 0x25         # byte: bullet Y position (pixels)
+ZP_BULLET_HIT = 0x26       # byte: 0=flying, 1=hit (edge or block)
+ZP_BULLET_ROW = 0x27       # byte: grid row at time of firing (0-9, fixed!)
+ZP_BULLET_HIT_COL = 0x2E   # byte: grid column of collision (GRID_WIDTH = edge hit)
+
+# Cannon state variables
+ZP_CANNON_TARGET_Y = 0x28  # byte: target Y position (pixels)
+ZP_CANNON_CURRENT_Y = 0x29 # byte: current Y position (smooth interpolation)
+ZP_CANNON_ROW = 0x2A       # byte: cannon grid row (0-9)
+
+# Sprite control
+ZP_SPRITE_ENABLE = 0x2B    # byte: sprite enable shadow register
+
+# Sprite block indices (within VIC bank)
+CANNON_BLOCK_READY = 0     # Block 0: cannon ready ($8000)
+CANNON_BLOCK_FIRED = 1     # Block 1: cannon fired ($8040)
+BULLET_BLOCK = 2           # Block 2: bullet ($8080)
+SPARKLE_BLOCK = 3          # Block 3: sparkle ($80C0)
+
+# Sparkle effect constants (single sprite for efficiency)
+SPARKLE_PHASE_MAX = 3       # Color fade phases (1=dark, 2=light, 3=dark again)
+SPARKLE_SPAWN_CHANCE = 200  # Higher = rarer (200 ≈ 22% per frame when free)
+
+# Sparkle ZP state - single byte for sprite 2 (phase 0=off, 1-3=active)
+ZP_SPARKLE_PHASE = 0x30     # byte: sparkle phase (0=off, 1-3=animating)
+
+# Joystick temp
+ZP_JOY_TMP = 0x2C        # byte: direction bits (bit 0=up, 1=down, 2=fire)
+# Joystick repeat delay counter (handled in IRQ for consistent timing)
+ZP_JOY_DELAY = 0x2F        # byte: frames until next repeat allowed
+
+# Game timer (IRQ-based, immune to jiffy clock overflow)
+ZP_FRAME_COUNTER = 0x36    # byte: frames since last second (0-59, CIA1 always 60Hz)
+ZP_GAME_SECONDS = 0x37     # word: total elapsed seconds (max ~18 hours)
+
+# =============================================================================
+# Mapped memory addresses
+# =============================================================================
+
+IRQ_LOADING_ADDR = 0x400
+IRQ_LOADING_BORDER_HEIGHT = 64
+
+# =============================================================================
+# CASCADE STATE MACHINE CONSTANTS
+# =============================================================================
+CASCADE_IDLE = 0        # No cascade active
+CASCADE_SCAN = 1        # Scanning for cascade opportunities
+CASCADE_SLIDE = 2       # Animate horizontal slide (smooth, 1 char at a time)
+CASCADE_SETTLE = 3      # Wait after slide
+CASCADE_CHECK = 4       # Check for new complete columns
+
+# =============================================================================
+# SCORE CONSTANTS
+# =============================================================================
+SCORE_COLUMN_CLEAR = 10     # Base points for clearing a column
+SCORE_CASCADE_CLEAR = 15    # Base points for clearing a column via cascade
+SCORE_LEVEL_BONUS = 5       # Additional points per level (added to base)
+
+
+# =============================================================================
+# IRQ HELPERS
+# =============================================================================
+@singleton
+class _Joystick:
+    # This prevents instant fire when starting a new game after Game Over
+    joy_delay: byte[ZP_JOY_DELAY] = 0
+
+@irq_helper
+def joy_handler():
+    # Joystick reading and keyboard buffer injection
+    joy_port: byte[JOY_PORT]           # CIA1 Port A - joystick port 2
+    joy_delay: byte[ZP_JOY_DELAY]      # Repeat delay counter
+    kbd_count: byte[KBD_COUNT]         # Keyboard buffer count ($C6)
+    kbd_buffer: array[byte, 10][KBD_BUFFER]  # Keyboard buffer ($0277)
+    key_to_inject: byte[ZP_JOY_TMP] = 0
+
+    # --- Joystick reading (inject keys into keyboard buffer) ---
+
+    # Read joystick port (active LOW: 0 = pressed)
+    # Check directions (priority: up > down > fire)
+    if (joy_port & JOY_UP_MASK) == 0:
+        key_to_inject = KEY_UP
+    elif (joy_port & JOY_DOWN_MASK) == 0:
+        key_to_inject = KEY_DOWN
+    elif (joy_port & JOY_FIRE_MASK) == 0:
+        key_to_inject = KEY_SPACE
+
+    # Apply repeat logic and inject into keyboard buffer
+    if key_to_inject != 0:
+        if joy_delay == 0:
+            # First press or delay expired - inject key
+            if kbd_count < 10:
+                kbd_buffer[kbd_count] = key_to_inject
+                kbd_count = kbd_count + 1
+            joy_delay = JOY_INITIAL_DELAY
+        elif joy_delay <= JOY_REPEAT_RATE:
+            # In repeat mode - faster rate
+            joy_delay = joy_delay - 1
+            if joy_delay == 0:
+                if kbd_count < 10:
+                    kbd_buffer[kbd_count] = key_to_inject
+                    kbd_count = kbd_count + 1
+                joy_delay = JOY_REPEAT_RATE
+        else:
+            # Still in initial delay
+            joy_delay = joy_delay - 1
+    else:
+        # No joystick input - reset delay for instant response next time
+        joy_delay = 0
+
+
+# =============================================================================
+# IRQ HANDLERS
+# =============================================================================
+
+@irq
+def irq_handler(vic: byte, cia1: byte):
+    ### Raster IRQ - updates sprite positions and reads joystick every frame ###
+    # ZP variables for sprite state (shared with main loop)
+    target_y: byte[ZP_CANNON_TARGET_Y]
+    current_y: byte[ZP_CANNON_CURRENT_Y]
+    bullet_active: byte[ZP_BULLET_ACTIVE]
+    bullet_x: word[ZP_BULLET_X]
+    bullet_y: byte[ZP_BULLET_Y]
+    bullet_hit: byte[ZP_BULLET_HIT]
+    bullet_hit_col: byte[ZP_BULLET_HIT_COL]
+    sprite_en: byte[ZP_SPRITE_ENABLE]
+
+    # VIC sprite registers (direct access, no method calls in IRQ!)
+    sprite_x0: byte[SPRITE_X]          # Sprite 0 X (cannon)
+    sprite_y0: byte[SPRITE_Y]          # Sprite 0 Y (cannon)
+    sprite_x1: byte[SPRITE_X + 2]      # Sprite 1 X (bullet)
+    sprite_y1: byte[SPRITE_Y + 2]      # Sprite 1 Y (bullet)
+    sprite_x_msb: byte[SPRITE_X_MSB]   # X bit 8 for all sprites
+    sprite_enable: byte[SPRITE_ENABLE] # Sprite enable register
+
+    # Bullet row (for collision detection)
+    bullet_row: byte[ZP_BULLET_ROW]
+
+    # Color RAM for inline collision detection
+    color_ram: array[byte, 1000][COLOR]
+    row_offset: tuple[word] = ROW_OFFSET_DATA
+
+    # Collision detection temps
+    next_x: word
+    screen_x: byte
+    grid_col: byte
+    screen_y: byte
+    pos: word
+    color: byte
+    collision: byte
+
+    # Sparkle effect variables (single sprite)
+    sparkle_phase: byte[ZP_SPARKLE_PHASE]
+    sprite_color: array[byte, 8][SPRITE_COLOR_0]
+
+    # Game timer variables (ZP-mapped for main loop access)
+    frame_counter: byte[ZP_FRAME_COUNTER]
+    game_seconds: word[ZP_GAME_SECONDS]
+
+    # Only process if it's our raster IRQ (no early return - epilogue must run!)
+    if (vic & 0x01) != 0:
+        # Acknowledge VIC interrupt
+        vic = 0x01
+
+        # --- Update cannon position (smooth interpolation) ---
+        if current_y < target_y:
+            current_y = current_y + 4
+            if current_y > target_y:
+                current_y = target_y
+        elif current_y > target_y:
+            current_y = current_y - 4
+            if current_y < target_y:
+                current_y = target_y
+
+        # Update cannon sprite Y position (sprite 0)
+        sprite_y0 = current_y
+
+        # --- Update bullet/cannon sprite 1 ---
+        if bullet_active != 0:
+            # PREDICTIVE COLLISION: Check BEFORE moving!
+            next_x = bullet_x + BULLET_SPEED
+            collision = 0
+
+            # Check right edge first (328 = 344 - 16 visible sprite width)
+            if next_x > 328:
+                bullet_hit = 1
+                bullet_hit_col = GRID_WIDTH  # Edge hit marker
+                bullet_active = 0
+                collision = 1
+                # Hide bullet sprite IMMEDIATELY to prevent flash-back glitch
+                sprite_en = sprite_en & 0xFD
+                sprite_enable = sprite_en
+
+                # IMMEDIATELY place player block at rightmost column
+                screen_y = PLAY_TOP + bullet_row * BLOCK_HEIGHT
+                pos = row_offset[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
+                # Only place if target is empty
+                color = (color_ram[pos] | color_ram[pos + 1] | color_ram[pos + 40] | color_ram[pos + 41]) & 0x0F
+                if color == BLACK:
+                    color_ram[pos] = WHITE
+                    color_ram[pos + 1] = WHITE
+                    color_ram[pos + 40] = WHITE
+                    color_ram[pos + 41] = WHITE
+            else:
+                # Check block collision at NEXT position (sprite right edge = +16)
+                screen_x = byte((next_x + 16 - SPRITE_X_OFFSET) / 8)
+                grid_col = screen_x / 2
+
+                if grid_col < GRID_WIDTH:
+                    # Calculate Color RAM position (top-left of 2x2 block)
+                    screen_y = PLAY_TOP + bullet_row * BLOCK_HEIGHT
+                    pos = row_offset[screen_y] + word(grid_col) * BLOCK_WIDTH
+
+                    # Check ALL 4 corners of the block!
+                    # During scroll, some corners may be BLACK (already copied) while others aren't
+                    color = (color_ram[pos] | color_ram[pos + 1] | color_ram[pos + 40] | color_ram[pos + 41]) & 0x0F
+
+                    if color != BLACK:
+                        # Block hit! Don't move, set hit flag
+                        bullet_hit = 1
+                        bullet_hit_col = grid_col
+                        bullet_active = 0
+                        collision = 1
+                        # Hide bullet sprite IMMEDIATELY to prevent flash-back glitch
+                        sprite_en = sprite_en & 0xFD
+                        sprite_enable = sprite_en
+
+                        # IMMEDIATELY place player block at hit_col - 1 (if valid)
+                        # This ensures block is placed even during scroll
+                        if grid_col > 0:
+                            pos = row_offset[screen_y] + word(grid_col - 1) * BLOCK_WIDTH
+                            # Only place if target is empty (check all 4 corners)
+                            color = (color_ram[pos] | color_ram[pos + 1] | color_ram[pos + 40] | color_ram[pos + 41]) & 0x0F
+                            if color == BLACK:
+                                # Draw white block (2x2)
+                                color_ram[pos] = WHITE
+                                color_ram[pos + 1] = WHITE
+                                color_ram[pos + 40] = WHITE
+                                color_ram[pos + 41] = WHITE
+
+            # Only move and update sprite if no collision
+            if collision == 0:
+                bullet_x = next_x
+                sprite_x1 = byte(bullet_x & 0xFF)
+                sprite_y1 = bullet_y
+
+                # Update X MSB (bit 1 for sprite 1)
+                if bullet_x > 255:
+                    sprite_x_msb = sprite_x_msb | 0x02
+                else:
+                    sprite_x_msb = sprite_x_msb & 0xFD
+        else:
+            # Bullet not active - sprite 1 follows cannon (loaded inside barrel)
+            # BUT: Don't move sprite back if collision just happened (bullet_hit != 0)
+            # This prevents the "flash back to cannon" glitch before main loop hides the sprite
+            if bullet_hit == 0:
+                sprite_x1 = CANNON_SPRITE_X
+                sprite_y1 = current_y
+                sprite_x_msb = sprite_x_msb & 0xFD  # Clear bit 1 (X < 256)
+
+        # --- Sparkle effect update ---
+        # Update sparkle sprite 2 - color fade
+        if sparkle_phase != 0:
+            # Color fade based on phase (1=dark, 2=light peak, 3=dark)
+            if sparkle_phase == 2:
+                sprite_color[2] = COLOR_SPARKLE_2  # Light peak
+            else:
+                sprite_color[2] = COLOR_SPARKLE_1  # Dark (phase 1 or 3)
+            # Advance phase
+            sparkle_phase = sparkle_phase + 1
+            if sparkle_phase > SPARKLE_PHASE_MAX:
+                # Animation complete - disable sprite 2
+                sparkle_phase = 0
+                sprite_en = sprite_en & 0xFB  # Clear bit 2
+                sprite_enable = sprite_en
+
+        return
+
+    # --- CIA1 Timer A (always 60 Hz, platform independent!) ---
+    if cia1 & 0x01:
+        # --- Game timer update ---
+        frame_counter = frame_counter + 1
+        if frame_counter >= 60:
+            frame_counter = 0
+            game_seconds = game_seconds + 1
+
+        joy_handler()
+
+    # Epilogue runs here - chains to system IRQ (keyboard, jiffy clock)
+
+
+@irq
+def irq_title_handler(vic: byte, cia1: byte):
+    ### Split screen IRQ for title screen - raster-based bitmap/text mode switching ###
+    # VIC registers
+    raster: byte[VIC_RASTER]
+    vic_ctrl1: byte[VIC_CTRL1]
+    vic_ctrl2: byte[VIC_CTRL2]
+    vic_memptr: byte[VIC_MEMPTR]
+
+    # Handle VIC raster interrupt
+    if vic & 0x01:
+        # Acknowledge VIC interrupt
+        vic = 0x01
+
+        # ZONE 3: At text switch line (>= TITLE_RASTER_TO_TEXT)
+        # Switch to TEXT mode - highest priority for fixed timing
+        if raster >= TITLE_RASTER_TO_TEXT:
+            # Next interrupt: top of screen
+            raster = TITLE_RASTER_TO_BITMAP
+            # Re-enable CIA1 interrupts
+            cia1 = 0x81
+            # Switch to text mode - stabilizer row hides any glitch
+            vic_memptr = TITLE_MEMPTR_TEXT
+            vic_ctrl1 = (vic_ctrl1 & 0x7F) & (0xFF ^ TITLE_VIC_BITMAP_MODE)
+            vic_ctrl2 = vic_ctrl2 & (0xFF ^ TITLE_VIC_MULTICOLOR)
+
+        # ZONE 2: Before switch line (>= TITLE_RASTER_BEFORE_SWITCH)
+        # Disable CIA1 for precise timing
+        elif raster >= TITLE_RASTER_BEFORE_SWITCH:
+            # Next interrupt: at the mode switch line
+            raster = TITLE_RASTER_TO_TEXT
+            cia1 = 0x7F  # Disable CIA1 interrupts
+
+        # ZONE 1: Top of screen (< TITLE_RASTER_BEFORE_SWITCH)
+        # Switch to BITMAP mode
+        else:
+            # Next interrupt: before the mode switch
+            raster = TITLE_RASTER_BEFORE_SWITCH
+            vic_memptr = TITLE_MEMPTR_BITMAP
+            vic_ctrl1 = ((vic_ctrl1 & 0x7F) | TITLE_VIC_BITMAP_MODE) & (0xFF ^ TITLE_VIC_ECM_MODE)
+            vic_ctrl2 = vic_ctrl2 | TITLE_VIC_MULTICOLOR
+            # Re-enable CIA1 interrupts
+            cia1 = 0x81
+            # From here we have enough time for a music tick
+            slotshot_music_tick()
+
+        # Do not process epilogue
+        return
+
+    # --- CIA1 Timer A (always 60 Hz, platform independent!) ---
+    if cia1 & 0x01:
+        # --- Joystick reading (inject keys into keyboard buffer) ---
+        joy_handler()
+
+    # Epilogue runs here - chains to system IRQ (keyboard, jiffy clock)
+
+
+@irq
+def irq_screen_handler(vic: byte, cia1: byte):
+    ### Screen IRQ handler ###
+    if vic & 0x01:
+        # Acknowledge VIC interrupt
+        vic = 0x01
+
+        # Play music
+        slotshot_music_tick()
+
+    if cia1 & 0x01:
+        # --- Joystick reading (inject keys into keyboard buffer) ---
+        joy_handler()
+
+    # Epilogue runs here - chains to system IRQ (keyboard, jiffy clock)
+
+
+# =============================================================================
+# SCREEN CLASS - Hardware access (Color RAM only optimization)
+# =============================================================================
+
+@singleton
+class Screen:
+    screen: array[byte, 1000][SCREEN] = [0]
+    colors: array[byte, 1000][COLOR] = [COLOR_BLACK]
+    border: byte[BORDER]
+    background: byte[BACKGROUND]
+    # ECM background colors
+    bg1: byte[VIC_BG1] = COLOR_TITLE_BG      # Title bar background (blue)
+    bg2: byte[VIC_BG2] = COLOR_STATUS_BG     # Status bar background (dark grey)
+    # bg3: byte[VIC_BG3] = RED
+    raster: byte[VIC_RASTER]
+    vic_ctrl1: byte[VIC_CTRL1]
+    vic_ctrl2: byte[VIC_CTRL2]
+    vic_memptr: byte[VIC_MEMPTR]
+
+    # CIA2 registers
+    cia2_pra: byte[CIA2_PRA]
+
+    # Sprite registers
+    sprite_x: array[byte, 16][SPRITE_X]
+    sprite_x_msb: byte[SPRITE_X_MSB]
+    sprite_enable: byte[SPRITE_ENABLE]
+    sprite_expand_x: byte[SPRITE_EXPAND_X]
+    sprite_expand_y: byte[SPRITE_EXPAND_Y]
+    sprite_priority: byte[SPRITE_PRIORITY]
+    sprite_multicolor: byte[SPRITE_MULTICOLOR]
+    sprite_mc1: byte[SPRITE_MC1]    # Multicolor 1 (shared by all sprites)
+    sprite_mc2: byte[SPRITE_MC2]    # Multicolor 2 (shared by all sprites)
+    sprite_color: array[byte, 8][SPRITE_COLOR_0]
+    sprite_ptr: array[byte, 8][SPRITE_POINTER_BASE]
+
+    row_offset: tuple[word] = ROW_OFFSET_DATA
+
+    def init_play_area():
+        ### Fill play area with block characters - colors determine visibility ###
+        ### BLACK color = invisible block, any other color = visible block ###
+        pos: word
+        screen_y: byte
+        x: byte
+        y: byte
+
+        # Iterate over block rows (10 blocks = 20 screen rows)
+        for y in range(GRID_HEIGHT):
+            screen_y = PLAY_TOP + y * BLOCK_HEIGHT
+            pos = self.row_offset[screen_y]
+
+            for x in range(GRID_WIDTH):
+                # Colors already BLACK from array init = invisible blocks
+                self.colors[pos] = BLACK
+                self.colors[pos + 1] = BLACK
+                self.colors[pos + 40] = BLACK
+                self.colors[pos + 41] = BLACK
+                # Top row of 2x2 block
+                self.screen[pos] = CHAR_BLOCK_TL
+                self.screen[pos + 1] = CHAR_BLOCK_TR
+                # Bottom row of 2x2 block (next screen row = +40)
+                self.screen[pos + 40] = CHAR_BLOCK_BL
+                self.screen[pos + 41] = CHAR_BLOCK_BR
+                # Colors already BLACK from array init = invisible blocks
+                pos += BLOCK_WIDTH
+
+    def init_charset():
+        ### Initialize charset by copying ROM to RAM, create custom chars, enable ECM ###
+        cpu_port: byte[CPU_PORT]
+        vic_memptr: byte[VIC_MEMPTR]
+        char_rom: array[byte, 2048][CHAR_ROM]
+        char_ram: array[byte, 2048][CHARSET_RAM]
+        custom_chars: tuple[byte] = CUSTOM_CHARS_DATA
+        half_chars: tuple[byte] = HALF_CHARS_DATA
+        progress_char: tuple[byte] = PROGRESS_CHAR_DATA
+        old_port: byte
+        code: byte
+        i: byte
+        j: byte
+        dst: word
+
+        # Disable I/O to access CHAROM at $D000
+        __sei__()
+        old_port = cpu_port
+        cpu_port = old_port & 0xFB
+
+        # Copy 2KB ROM charset to RAM at $C800 (128 bytes × 16 rows)
+        # This charset is shared by game AND title menu (Bank 3 has no ROM hole)
+        blkcpy(char_rom, 0, char_ram, 0, 128, 16, 128)
+
+        # Restore I/O
+        cpu_port = old_port
+        __cli__()
+
+        # Create custom block characters (60-63) with rounded corners and 1px border
+        # Characters start at offset 480 (60 * 8), total 32 bytes for 4 chars
+        for i in range(len(custom_chars)):
+            char_ram[480 + i] = custom_chars[i]
+
+        # Create progress bar character (59) - thin line at bottom
+        # Character 59 starts at offset 472 (59 * 8)
+        for i in range(len(progress_char)):
+            char_ram[472 + i] = progress_char[i]
+
+        # Create title half-characters from pre-computed data
+        # 10 characters at screen codes 27-31, 34-38 (skip 32=space, 33=!)
+        for i in range(10):
+            code = 27 + i
+            if code >= 32:
+                code += 2  # Skip space (32) and ! (33)
+            dst = word(code) * 8  # Destination offset in char RAM
+            for j in range(8):
+                char_ram[dst + j] = half_chars[i * 8 + j]
+
+    def sync_raster(raster: byte):
+        vic_ctrl: byte[VIC_CTRL1]
+        while self.raster > raster or (vic_ctrl & 0x80) != 0:
+            pass
+        while self.raster < raster and (vic_ctrl & 0x80) == 0:
+            pass
+
+    def wait_frames(count: byte):
+        ### Wait for multiple frames ###
+        vic_ctrl: byte[VIC_CTRL1]
+        for _ in range(count):
+            # Wait for lower border
+            while self.raster < IRQ_RASTER_BOTTOM and (vic_ctrl & 0x80) == 0:
+                pass
+            # Wait for raster 256+ (bit 8 set in $D011)
+            while (vic_ctrl & 0x80) == 0:
+                pass
+            while self.raster < 10 or (vic_ctrl & 0x80) != 0:
+                pass
+
+    def set_game_mode():
+        # Set background and border colors
+        self.background = COLOR_SCREEN_BG
+        # Fill play area with block characters (color determines visibility)
+        self.init_play_area()
+        __sei__()
+        ### Configure VIC for ECM text mode (game) ###
+        self.vic_memptr = GAME_MEMPTR
+        # ECM ON (bit 6), DEN ON (bit 4), Bitmap OFF (bit 5), preserve raster MSB (bit 7 masked)
+        self.vic_ctrl1 = (self.vic_ctrl1 & 0x9F) | TITLE_VIC_ECM_MODE | VIC_DEN
+        # Multicolor OFF
+        self.vic_ctrl2 = self.vic_ctrl2 & (0xFF ^ TITLE_VIC_MULTICOLOR)
+        __cli__()
+
+    def set_bitmap_mode():
+        ### Configure VIC for multicolor bitmap mode (title screen) ###
+        # Set background and border colors
+        self.border = SLOTSHOT_BGCOLOR
+        self.background = SLOTSHOT_BGCOLOR
+        # The IRQ will switch to the bitmap mode
+        self.cia2_pra = self.cia2_pra & 0xFC  # Bank 3 ($C000-$FFFF)
+
+    def __init__():
+        # Initialize charset
+        self.init_charset()
+
+    def scroll_play_area():
+        ### Scroll Color RAM 2 chars left - caller handles raster sync and SEI/CLI! ###
+        offset: word
+        # Just the blkcpy - caller is responsible for:
+        # 1. Raster sync
+        # 2. SEI before, CLI after bullet_x adjustment
+        offset = self.row_offset[PLAY_TOP]
+        blkcpy(self.colors, offset + 2, self.colors, offset, 38, 20, 40)
+
+    def print_at(x: byte, y: byte, text: alias[string], col: byte, bg: byte):
+        ### Print text with ECM background select (bg = BG_PLAY/BG_TITLE/BG_STATUS/BG_GAMEOVER) ###
+        pos: word
+        i: byte
+        code: byte
+
+        pos = self.row_offset[y] + x
+        for i in range(len(text)):
+            code = byte(text[i])
+            if code >= 65 and code <= 90:
+                code = code - 64
+            elif code >= 97 and code <= 122:
+                code = code - 96
+            elif code >= 48 and code <= 57:
+                pass
+            # Add ECM background offset to character code
+            self.screen[pos] = code + bg
+            self.colors[pos] = col
+            pos += 1
+
+    def print_center_at_offset(y: byte, text: alias[string], col: byte, bg: byte, offset: sbyte):
+        ### Print text centered at the given y position with an offset ###
+        self.print_at(20 - len(text) / 2 + offset, y, text, col, bg)
+
+    def print_center_at(y: byte, text: alias[string], col: byte, bg: byte):
+        ### Print text centered at the given y position###
+        self.print_center_at_offset(y, text, col, bg, 0)
+
+    def print_number(x: byte, y: byte, num: word, digits: byte, col: byte, bg: byte):
+        ### Print number with ECM background select ###
+        pos: word
+        digit_arr: array[byte, 5]
+        digit_count: byte
+        temp: word
+        i: byte
+
+        pos = self.row_offset[y] + x
+        temp = num
+        digit_count = 0
+
+        if temp == 0:
+            digit_arr[0] = 0
+            digit_count = 1
+        else:
+            while temp > 0 and digit_count < 5:
+                digit_arr[digit_count] = byte(temp % 10)
+                temp = temp / 10
+                digit_count += 1
+
+        for i in range(digits - digit_count):
+            # 48 = '0' screen code, add ECM bg offset
+            self.screen[pos] = 48 + bg
+            self.colors[pos] = col
+            pos += 1
+
+        for i in range(digit_count):
+            self.screen[pos] = 48 + digit_arr[digit_count - 1 - i] + bg
+            self.colors[pos] = col
+            pos += 1
+
+    def draw_progress_bar(filled: byte):
+        ### Draw progress bar with Commodore rainbow colors ###
+        ### filled = number of characters to show (0-40), depletes from right to left ###
+        ### Depleted segments show dark grey line instead of disappearing ###
+        rainbow: tuple[byte] = COMMODORE_RAINBOW_DATA
+        pos: word
+        i: byte
+        ecm_char: byte
+
+        # Calculate starting position (row 22, column 0)
+        pos = self.row_offset[PROGRESS_BAR_ROW] + PROGRESS_BAR_START
+
+        # ECM character code - always use progress bar character
+        ecm_char = CHAR_PROGRESS + BG_STATUS
+
+        # Draw the progress bar (rainbow on left, dark grey on right)
+        for i in range(PROGRESS_BAR_WIDTH):
+            self.screen[pos] = ecm_char
+            if i < filled:
+                # Active segment - rainbow color
+                self.colors[pos] = rainbow[i]
+            else:
+                # Depleted segment - grey line remains visible on dark grey bg
+                self.colors[pos] = GREY
+            pos += 1
+
+
+# =============================================================================
+# RANDOM NUMBER GENERATOR (Multi-step Galois LFSR)
+# =============================================================================
+
+@singleton
+class Random:
+    # 16-bit Galois LFSR with dual-byte mixing.
+    # Combines high byte (better stats) with low byte (faster change).
+    # Counter adds extra variation with coprime step.
+    # Period: 65535 (visits every non-zero 16-bit value exactly once)
+    state: word[RANDOM_STATE_ADDR]
+    state_lo: byte[RANDOM_STATE_ADDR]      # Direct access to low byte
+    state_hi: byte[RANDOM_STATE_ADDR + 1]  # Direct access to high byte
+    jiffy: word[JIFFY_HI_ADDR]             # Jiffy clock high byte for seeding
+    jiffy_lo: byte[JIFFY_LO_ADDR]          # Jiffy clock low byte for whitening
+    raster: byte[VIC_RASTER]               # Raster for extra seed entropy
+    counter: byte[RANDOM_COUNTER_ADDR]     # Counter for extra randomness
+
+    def __init__():
+        # Seed from jiffy clock XOR raster for maximum entropy
+        self.state = (self.jiffy ^ (word(self.raster) << 1)) | 0x0100
+
+    def next() -> byte:
+        # Single LFSR step - polynomial x^16 + x^14 + x^13 + x^11 + 1
+        if self.state & 1:
+            self.state = (self.state >> 1) ^ 0xB400
+        else:
+            self.state = self.state >> 1
+        # Decrement counter (coprime step for better distribution)
+        self.counter -= 7
+        # Combine BOTH bytes for maximum bit mixing
+        # High byte: better stats, Low byte: faster change rate
+        return (self.state_hi ^ self.state_lo) ^ self.counter
+
+    def range(max_val: byte) -> byte:
+        # For non-power-of-2 values (still has modulo bias)
+        return self.next() % max_val
+
+    def range_mask(mask: byte) -> byte:
+        # FAST! Use for power-of-2 ranges: range_mask(0x1F) = 0-31
+        return self.next() & mask
+
+
+# =============================================================================
+# GRID CLASS - Block management (Color RAM only)
+# =============================================================================
+
+class Grid:
+    # No cells array! Color RAM is the single source of truth.
+    # No buffer needed! Direct blkcpy from pool to Color RAM.
+
+    # Pre-generated column patterns (10 bytes each, size from COLUMN_POOL_SIZE)
+    column_pool: array[byte, COLUMN_POOL_SIZE * GRID_HEIGHT][COLUMN_POOL_ADDR]
+
+    # Dying blocks animation - stores screen positions of blocks that will fade out
+    # Max 40 blocks (4 columns * 10 rows = worst case in one scroll cycle)
+    dying_positions: array[word, 40]
+    dying_count: byte = 0
+
+    row_offset: tuple[word] = ROW_OFFSET_DATA
+
+    def init_pool():
+        ### Pre-generate column patterns at startup ###
+        block_colors: tuple[byte] = BLOCK_COLORS_DATA
+        col: byte
+        row: byte
+        holes: byte
+        h: byte
+        hole_pos: byte
+        color: byte
+        offset: word = 0
+        ro: word
+
+        for col in range(COLUMN_POOL_SIZE):
+            ro = offset
+
+            # Fill column with random colors (FAST bitmask - no modulo!)
+            for row in range(GRID_HEIGHT):
+                color = block_colors[Random.range_mask(BLOCK_COLORS_MASK)]
+                self.column_pool[ro] = color
+                ro += 1
+
+            # Add 1-4 random holes (FAST bitmask for hole count)
+            holes = Random.range_mask(MAX_HOLES_MASK) + 1
+            for h in range(holes):
+                hole_pos = Random.range(GRID_HEIGHT)  # 10 = not power-of-2, use modulo
+                self.column_pool[offset + word(hole_pos)] = BLACK
+
+            offset += 10
+
+    def get_color(col: byte, row: byte) -> byte:
+        ### Get block color from Color RAM (BLACK = empty) ###
+        ### NOTE: Color RAM is 4-bit only! Upper 4 bits are garbage on read! ###
+        sx: byte
+        sy: byte
+        sx = col * BLOCK_WIDTH
+        sy = PLAY_TOP + row * BLOCK_HEIGHT
+        return Screen.colors[self.row_offset[sy] + sx] & 0x0F
+
+    def has_block(col: byte, row: byte) -> bool:
+        ### Check if there's a block at grid position (Color RAM based) ###
+        return self.get_color(col, row) != BLACK
+
+    def grid_to_screen_x(col: byte) -> byte:
+        return col * BLOCK_WIDTH
+
+    def grid_to_screen_y(row: byte) -> byte:
+        return PLAY_TOP + row * BLOCK_HEIGHT
+
+    def spawn_column():
+        ### Pick random column from pool and blit directly to Color RAM ###
+        ### Uses 4 blkcpy calls with dual-stride for 2x2 block expansion ###
+        pool_offset: word
+        offset: word
+
+        # Pick random column from pool (FAST bitmask - no modulo bias!)
+        pool_offset = word(Random.range_mask(COLUMN_POOL_MASK)) * 10
+
+        # Calculate Color RAM offset for rightmost column (chars 38-39)
+        offset = self.row_offset[PLAY_TOP] + 38
+
+        # 4 blkcpy calls to fill 2x2 blocks:
+        # src_stride=1 (pool bytes are consecutive)
+        # dst_stride=80 (2 screen rows = 80 bytes between blocks)
+        # width=1, height=10 (10 blocks)
+
+        # Top-left corner of each block
+        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, offset, 80, 1, 10)
+        # Top-right corner
+        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, offset + 1, 80, 1, 10)
+        # Bottom-left corner (+40 = next screen row)
+        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, offset + 40, 80, 1, 10)
+        # Bottom-right corner
+        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, offset + 41, 80, 1, 10)
+
+    def age_player_blocks():
+        ### Age player-placed blocks: WHITE → LIGHT_GREY → GREY → DARK_GREY ###
+        ### DARK_GREY blocks are added to dying list for flash animation ###
+        ### Called once per scroll, so blocks disappear after 4 scrolls ###
+        base_pos: word
+        pos: word
+        color: byte
+        row: byte
+        col: byte
+
+        # Reset dying list at start of each age cycle
+        self.dying_count = 0
+
+        # Iterate over all grid cells (only top-left corner of each 2x2 block)
+        for row in range(GRID_HEIGHT):
+            base_pos = self.row_offset[PLAY_TOP + row * BLOCK_HEIGHT]
+            for col in range(GRID_WIDTH):
+                pos = base_pos + word(col) * BLOCK_WIDTH
+                color = Screen.colors[pos] & 0x0F
+
+                # Age player blocks (white/grey shades only)
+                if color == WHITE:
+                    color = LIGHT_GREY
+                elif color == LIGHT_GREY:
+                    color = GREY
+                elif color == GREY:
+                    color = DARK_GREY
+                elif color == DARK_GREY:
+                    # Don't change to BLACK yet - add to dying list for animation!
+                    if self.dying_count < 40:
+                        self.dying_positions[self.dying_count] = pos
+                        self.dying_count += 1
+                    continue  # Keep DARK_GREY, animation will handle the rest
+                else:
+                    continue  # Not a player block, skip
+
+                # Update all 4 cells of the 2x2 block
+                Screen.colors[pos] = color
+                Screen.colors[pos + 1] = color
+                Screen.colors[pos + 40] = color
+                Screen.colors[pos + 41] = color
+
+    def is_column_complete(col: byte) -> bool:
+        ### Check if column is complete (all rows have blocks) - Color RAM based ###
+        row: byte
+        for row in range(GRID_HEIGHT):
+            if not self.has_block(col, row):
+                return False
+        return True
+
+    def remove_complete_column(col: byte):
+        ### Remove complete column and shift LEFT columns to the RIGHT ###
+        ### This "pushes back" the blocks, giving the player more space! ###
+        ### NOTE: Flash effect is handled by Game.update_effect() state machine ###
+        c: byte
+        src_offset: word
+        dst_offset: word
+
+        # Wait for raster to be outside play area to avoid visual glitches
+        while Screen.raster < IRQ_RASTER_BOTTOM or Screen.raster > 250:
+            pass
+
+        # Shift columns RIGHT: copy from col-1 down to 0
+        # Each iteration: copy column c to column c+1
+        # CRITICAL: process RIGHT to LEFT to avoid overwriting data before copying!
+        c = col
+        while c > 0:
+            c -= 1
+            src_offset = self.row_offset[PLAY_TOP] + word(c) * BLOCK_WIDTH
+            dst_offset = src_offset + BLOCK_WIDTH
+            # Copy both screen RAM and color RAM
+            blkcpy(Screen.screen, src_offset, Screen.screen, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
+            blkcpy(Screen.colors, src_offset, Screen.colors, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
+
+
+# =============================================================================
+# GAME CLASS - Main game logic (IRQ-based sprites)
+# =============================================================================
+
+class Game:
+    grid: Grid
+
+    score: word = INITIAL_SCORE
+    level: byte = 1
+    cols_cleared: word = 0  # Total columns cleared
+
+    move_timer: word = 0
+    last_jiffy: byte = 0      # Last jiffy_lo value for delta timing (60 Hz)
+    column_speed: word = 250  # CIA1 ticks between column movements (60 Hz, platform independent)
+
+    running: bool = True
+    game_over: bool = False
+
+    # Effect state machine (non-blocking column clear animation)
+    effect_phase: byte = 0       # 0=idle, 1-7=flash phases
+    effect_frame: byte = 0       # Frame counter within current phase
+    effect_col: byte = 0         # Column being animated
+    effect_saved_colors: array[byte, GRID_HEIGHT]  # Saved original colors
+    effect_from_cascade: bool = False  # True if column clear was triggered by cascade
+
+    # Cascade state machine (horizontal slide effect)
+    cascade_phase: byte = 0       # Current state (CASCADE_IDLE, CASCADE_SCAN, etc.)
+    cascade_frame: byte = 0       # Frame counter within current state
+    cascade_row: byte = 0         # Row being cascaded (0-9)
+    cascade_src_col: byte = 0     # Source column (leftmost block to slide)
+    cascade_dst_col: byte = 0     # Destination column (rightmost empty)
+    cascade_scan_row: byte = 0    # Current scan position
+    cascade_max_col: byte = 0     # Maximum column to search (= effect_col, blocks right of this don't cascade)
+
+    # Dying blocks animation (flash before disappearing)
+    # Animation: DARK_GREY → GREY → LIGHT_GREY → WHITE → BLACK (gone!)
+    dying_phase: byte = 0         # 0=idle, 1-4=animation phases
+    dying_frame: byte = 0         # Frame counter within current phase
+    scroll_pending: bool = False  # Scroll waiting for dying animation to finish
+
+    # ZP variable mappings for IRQ communication
+    cannon_row_zp: byte[ZP_CANNON_ROW]
+    cannon_target_zp: byte[ZP_CANNON_TARGET_Y]
+    cannon_current_zp: byte[ZP_CANNON_CURRENT_Y]
+    bullet_active_zp: byte[ZP_BULLET_ACTIVE]
+    bullet_x_zp: irq_safe[word[ZP_BULLET_X]]
+    bullet_y_zp: byte[ZP_BULLET_Y]
+    bullet_hit_zp: byte[ZP_BULLET_HIT]
+    bullet_hit_col_zp: byte[ZP_BULLET_HIT_COL]
+    bullet_row_zp: byte[ZP_BULLET_ROW]  # Grid row at firing time (fixed!)
+    sprite_en_zp: byte[ZP_SPRITE_ENABLE]
+
+    row_offset: tuple[word] = ROW_OFFSET_DATA
+
+    def draw_title():
+        ### Draw title bar (rows 0-1) with ECM background and half-characters ###
+        title_row0: tuple[byte] = TITLE_ROW0  # Bottom halves
+        title_row1: tuple[byte] = TITLE_ROW1  # Top halves
+        x: byte
+        pos: word
+        ecm_char: byte
+
+        # ECM: space + BG_TITLE offset gives blue background from $D022
+        ecm_char = CHAR_SPACE + BG_TITLE
+
+        # Fill both rows with blue background
+        for x in range(40):
+            pos = self.row_offset[0] + x
+            Screen.screen[pos] = ecm_char
+            Screen.colors[pos] = COLOR_TITLE_TEXT
+            Screen.screen[pos + 40] = ecm_char
+            Screen.colors[pos + 40] = COLOR_TITLE_TEXT
+
+        # Draw "SLOTSHOT" using half-characters (8 letters, centered at column 16)
+        # Row 0: bottom halves (these appear at top of title bar)
+        # Row 1: top halves (these appear at bottom of title bar)
+        pos = self.row_offset[0] + 16
+        for x in range(8):
+            Screen.screen[pos + x] = title_row0[x] + BG_TITLE
+            Screen.screen[pos + 40 + x] = title_row1[x] + BG_TITLE
+
+    def update_status():
+        Screen.print_number(7, 23, self.score, 5, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(19, 23, self.cols_cleared, 4, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(28, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+
+    def update_time():
+        ### Update elapsed time display on status bar ###
+        # Uses IRQ-based game_seconds counter (immune to jiffy clock overflow)
+        game_seconds: word[ZP_GAME_SECONDS]
+        minutes: byte
+        secs: byte
+
+        # Calculate minutes and seconds from IRQ counter
+        minutes = byte(game_seconds / 60)
+        secs = byte(game_seconds % 60)
+
+        # Display at position 32: "T:00:00"
+        Screen.print_number(34, 23, word(minutes / 10), 1, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(35, 23, word(minutes % 10), 1, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(37, 23, word(secs / 10), 1, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(38, 23, word(secs % 10), 1, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+
+    def draw_status():
+        ### Draw status bar (rows 22-24) with ECM background ###
+        x: byte
+        pos: word
+        ecm_char: byte
+
+        # ECM: space + BG_STATUS offset gives dark grey background from $D023
+        ecm_char = CHAR_SPACE + BG_STATUS
+
+        for x in range(40):
+            pos = self.row_offset[22] + x
+            Screen.screen[pos] = ecm_char
+            Screen.screen[pos + 40] = ecm_char
+            Screen.screen[pos + 80] = ecm_char
+
+        Screen.print_at(1, 23, "SCORE:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(14, 23, "COLS:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(25, 23, "LV:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(32, 23, "T:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(36, 23, ":", COLOR_STATUS_TEXT, BG_STATUS)
+
+        self.update_status()
+        self.update_time()
+
+        # Initialize progress bar (full at start)
+        Screen.draw_progress_bar(PROGRESS_BAR_WIDTH)
+
+    def is_game_over() -> bool:
+        ### Check if any block reached leftmost column (game over condition) ###
+        row: byte
+        for row in range(GRID_HEIGHT):
+            if self.grid.has_block(0, row):
+                return True
+        return False
+
+    def start_effect(col: byte):
+        ### Start column clear effect animation ###
+        row: byte
+        sx: byte
+        pos: word
+
+        # Calculate screen X position
+        sx = col * BLOCK_WIDTH
+
+        # Save original colors
+        for row in range(GRID_HEIGHT):
+            pos = self.row_offset[PLAY_TOP + row * BLOCK_HEIGHT] + sx
+            self.effect_saved_colors[row] = Screen.colors[pos] & 0x0F
+
+        # Start effect state machine
+        self.effect_col = col
+        self.effect_phase = 1
+        self.effect_frame = 0
+
+        # Hide bullet sprite during effect animation
+        self.sprite_en_zp = self.sprite_en_zp & 0xFD
+        Screen.sprite_enable = self.sprite_en_zp
+
+    def check_complete_columns():
+        ### Check for complete columns and start effect if found ###
+        ### Only one effect can run at a time ###
+        col: byte
+
+        # Don't start new effect if one is already running or cascade is active
+        if self.effect_phase != 0 or self.cascade_phase != CASCADE_IDLE:
+            return
+
+        # Find first complete column
+        for col in range(GRID_WIDTH):
+            if self.grid.is_column_complete(col):
+                self.effect_from_cascade = False  # Normal clear, no bonus
+                self.start_effect(col)
+                return  # Only one effect at a time
+
+    def find_cascade_opportunity() -> bool:
+        ### Find next row that can slide right ###
+        ### Searches from cascade_scan_row onwards ###
+        ### Only searches columns up to cascade_max_col (blocks right of removed column don't cascade) ###
+        ### Returns True if found, sets cascade_row, cascade_src_col, cascade_dst_col ###
+        row: byte
+        col: byte
+        first_block_col: byte
+        first_empty_col: byte
+        found_block: bool
+        found_empty: bool
+
+        row = self.cascade_scan_row
+        while row < GRID_HEIGHT:
+            # Scan row from RIGHT to LEFT, but only up to cascade_max_col
+            # Looking for: empty space followed by blocks to its left
+            found_empty = False
+            first_empty_col = 0
+            found_block = False
+            first_block_col = 0
+
+            # Start from cascade_max_col + 1 to check if blocks can slide INTO the removed column area
+            # After shift, blocks at cascade_max_col may have empty space to their RIGHT (at cascade_max_col+1)
+            col = self.cascade_max_col + 1
+            if col >= GRID_WIDTH:
+                col = GRID_WIDTH - 1
+            while col > 0:
+                if not found_empty:
+                    # Looking for first empty space
+                    if not self.grid.has_block(col, row):
+                        found_empty = True
+                        first_empty_col = col
+                else:
+                    # Looking for block to the LEFT of empty space
+                    if self.grid.has_block(col, row):
+                        found_block = True
+                        first_block_col = col
+                        break
+                col -= 1
+
+            if found_block and found_empty and first_block_col < first_empty_col:
+                # Found cascade opportunity!
+                # Save for next scan iteration
+                self.cascade_scan_row = row + 1
+
+                # Find leftmost contiguous block in this row
+                # (all blocks from col 0 to first_block_col will slide)
+                while first_block_col > 0:
+                    if self.grid.has_block(first_block_col - 1, row):
+                        first_block_col -= 1
+                    else:
+                        break
+
+                # Set cascade parameters
+                self.cascade_row = row
+                self.cascade_src_col = first_block_col
+                self.cascade_dst_col = first_empty_col
+                return True
+
+            row += 1
+
+        return False
+
+    def start_cascade_scan():
+        ### Start scanning for cascade opportunities ###
+        ### Called after column effect completes ###
+        ### Only searches columns LEFT of the removed column (effect_col) ###
+        self.cascade_phase = CASCADE_SCAN
+        self.cascade_scan_row = 0
+        self.cascade_frame = 0
+        self.cascade_max_col = self.effect_col  # Only search up to this column
+
+    def update_cascade_slide():
+        ### Animate horizontal slide - 1 character per 2 frames (smooth) ###
+        ### 2 steps = 1 block, chars stay in place (TL stays TL, etc) ###
+        cx: byte
+        src_pos: word
+        color: byte
+        sy: byte
+        start_char: byte
+        end_char: byte
+        current_step: byte
+
+        # Move every 2 frames for smooth animation
+        if self.cascade_frame % 2 != 0:
+            self.cascade_frame += 1
+            return
+
+        # Calculate current step (how many chars we've already moved)
+        current_step = self.cascade_frame / 2
+
+        # Check if slide complete (2 character steps = 1 block)
+        if current_step >= 2:
+            self.cascade_phase = CASCADE_SETTLE
+            self.cascade_frame = 0
+            return
+
+        # Wait for raster sync to avoid visual glitches
+        while Screen.raster < IRQ_RASTER_BOTTOM or Screen.raster > 240:
+            pass
+
+        sy = PLAY_TOP + self.cascade_row * BLOCK_HEIGHT
+
+        # Character range to move - TRACK where blocks are NOW
+        start_char = self.cascade_src_col * BLOCK_WIDTH + current_step
+        end_char = self.cascade_dst_col * BLOCK_WIDTH + current_step
+
+        # SWAP only the affected region's screen chars (TL↔TR, BL↔BR)
+        # Next step will swap back - after 2 swaps it returns to normal
+        for cx in range(self.cascade_src_col * BLOCK_WIDTH, (self.cascade_dst_col + 1) * BLOCK_WIDTH):
+            # Top row - swap TL↔TR
+            src_pos = self.row_offset[sy] + cx
+            if Screen.screen[src_pos] == CHAR_BLOCK_TL:
+                Screen.screen[src_pos] = CHAR_BLOCK_TR
+            else:
+                Screen.screen[src_pos] = CHAR_BLOCK_TL
+            # Bottom row - swap BL↔BR
+            src_pos = self.row_offset[sy + 1] + cx
+            if Screen.screen[src_pos] == CHAR_BLOCK_BL:
+                Screen.screen[src_pos] = CHAR_BLOCK_BR
+            else:
+                Screen.screen[src_pos] = CHAR_BLOCK_BL
+
+        # Now shift COLOR RAM 1 position right (process RIGHT to LEFT)
+        cx = end_char - 1
+        while cx >= start_char:
+            # Top row - move color only
+            src_pos = self.row_offset[sy] + cx
+            color = Screen.colors[src_pos] & 0x0F
+            if color != BLACK:
+                Screen.colors[src_pos + 1] = color
+                Screen.colors[src_pos] = BLACK
+            # Bottom row - move color only
+            src_pos = self.row_offset[sy + 1] + cx
+            color = Screen.colors[src_pos] & 0x0F
+            if color != BLACK:
+                Screen.colors[src_pos + 1] = color
+                Screen.colors[src_pos] = BLACK
+
+            if cx == 0:
+                break
+            cx -= 1
+
+        self.cascade_frame += 1
+
+    def update_cascade_settle():
+        ### Brief settle pause after slide ###
+        self.cascade_frame += 1
+        if self.cascade_frame >= 3:  # 3 frames settle
+            self.cascade_phase = CASCADE_CHECK
+            self.cascade_frame = 0
+
+    def update_cascade_check():
+        ### Check for complete columns after cascade ###
+        col: byte
+
+        # Look for complete columns
+        for col in range(GRID_WIDTH):
+            if self.grid.is_column_complete(col):
+                # Found complete column - start column effect
+                # Cascade will resume after column effect completes
+                self.cascade_phase = CASCADE_IDLE
+                self.effect_from_cascade = True  # Bonus points for cascade clear!
+                self.start_effect(col)
+                return
+
+        # No complete column - continue scanning for more cascade opportunities
+        self.cascade_phase = CASCADE_SCAN
+
+    def update_cascade():
+        ### Main cascade state machine - call every frame ###
+
+        if self.cascade_phase == CASCADE_IDLE:
+            return
+
+        elif self.cascade_phase == CASCADE_SCAN:
+            if self.find_cascade_opportunity():
+                # Skip flash, go directly to smooth slide
+                self.cascade_phase = CASCADE_SLIDE
+                self.cascade_frame = 0
+            else:
+                # No more cascade opportunities - all done!
+                self.cascade_phase = CASCADE_IDLE
+                # Re-enable bullet sprite now that all effects complete
+                self.sprite_en_zp = self.sprite_en_zp | 0x02
+                Screen.sprite_enable = self.sprite_en_zp
+                # Check for complete columns that may have formed during cascade
+                # (bullet hit during cascade doesn't trigger check_complete_columns)
+                self.check_complete_columns()
+                # Restore cannon sprite ONLY if no new effect started
+                if self.effect_phase == 0:
+                    Screen.sprite_ptr[0] = CANNON_BLOCK_READY
+
+        elif self.cascade_phase == CASCADE_SLIDE:
+            self.update_cascade_slide()
+
+        elif self.cascade_phase == CASCADE_SETTLE:
+            self.update_cascade_settle()
+
+        elif self.cascade_phase == CASCADE_CHECK:
+            self.update_cascade_check()
+
+    def update_effect():
+        ### Update effect state machine - call every frame ###
+        ### Returns when effect completes (removes column, updates score) ###
+        level_thresholds: tuple[word] = LEVEL_THRESHOLDS
+        level_speeds: tuple[word] = LEVEL_SPEEDS
+        row: byte
+        sx: byte
+        base_pos: word
+        color: byte
+
+        # No effect running
+        if self.effect_phase == 0:
+            return
+
+        # Calculate screen X position
+        sx = self.effect_col * BLOCK_WIDTH
+
+        # Set colors based on current phase (odd=black, even=original)
+        if self.effect_phase & 1:
+            color = BLACK
+
+        for row in range(GRID_HEIGHT):
+            base_pos = self.row_offset[PLAY_TOP + row * BLOCK_HEIGHT] + sx
+            if self.effect_phase & 1:
+                # Odd phases: BLACK (invisible)
+                Screen.colors[base_pos] = BLACK
+                Screen.colors[base_pos + 1] = BLACK
+                Screen.colors[base_pos + 40] = BLACK
+                Screen.colors[base_pos + 41] = BLACK
+            else:
+                # Even phases: Original colors
+                Screen.colors[base_pos] = self.effect_saved_colors[row]
+                Screen.colors[base_pos + 1] = self.effect_saved_colors[row]
+                Screen.colors[base_pos + 40] = self.effect_saved_colors[row]
+                Screen.colors[base_pos + 41] = self.effect_saved_colors[row]
+
+        # Advance frame counter
+        self.effect_frame += 1
+        if self.effect_frame >= 3:
+            self.effect_frame = 0
+            self.effect_phase += 1
+
+            # Effect complete?
+            if self.effect_phase > 7:
+                self.effect_phase = 0
+
+                # Remove the column (shifts left columns right)
+                self.grid.remove_complete_column(self.effect_col)
+
+                # Update score (cascade clears give bonus points!)
+                # Formula: base_score + (level - 1) * level_bonus
+                self.cols_cleared += 1
+                if self.effect_from_cascade:
+                    self.score += SCORE_CASCADE_CLEAR + word(self.level - 1) * SCORE_LEVEL_BONUS
+                else:
+                    self.score += SCORE_COLUMN_CLEAR + word(self.level - 1) * SCORE_LEVEL_BONUS
+
+                # Level up check (BEFORE update_status so level displays immediately!)
+                # Max level determined by len(level_speeds)
+                while self.level < len(level_speeds):
+                    if self.score >= level_thresholds[self.level - 1]:
+                        self.level += 1
+                        self.column_speed = level_speeds[self.level - 1]
+                    else:
+                        break
+
+                self.update_status()
+
+                # Start cascade scan (sprite restore moved to cascade completion)
+                self.start_cascade_scan()
+
+    def update_dying_blocks():
+        ### Animate dying blocks through DYING_COLORS phases ###
+        ### Called every frame, runs independently of other animations ###
+        dying_colors: tuple[byte] = DYING_COLORS
+        i: byte
+        pos: word
+        color: byte
+
+        # No dying blocks?
+        if self.grid.dying_count == 0:
+            return
+
+        # Not started yet?
+        if self.dying_phase == 0:
+            return
+
+        # Get color for current phase (phase 1 = index 0, etc.)
+        color = dying_colors[self.dying_phase - 1]
+
+        # Wait for raster to be outside play area to avoid visual glitches
+        while Screen.raster < IRQ_RASTER_BOTTOM or Screen.raster > 250:
+            pass
+
+        # Apply color to all dying blocks
+        for i in range(self.grid.dying_count):
+            pos = self.grid.dying_positions[i]
+            Screen.colors[pos] = color
+            Screen.colors[pos + 1] = color
+            Screen.colors[pos + 40] = color
+            Screen.colors[pos + 41] = color
+
+        # Advance frame counter
+        self.dying_frame += 1
+        if self.dying_frame >= 2:  # 2 frames per phase
+            self.dying_frame = 0
+            self.dying_phase += 1
+
+            # Animation complete? (tuple length determines phase count)
+            if self.dying_phase > len(dying_colors):
+                self.dying_phase = 0
+                self.grid.dying_count = 0  # Clear the dying list
+
+    def start_dying_animation():
+        ### Start dying animation if there are blocks to animate ###
+        if self.grid.dying_count > 0:
+            self.dying_phase = 1
+            self.dying_frame = 0
+
+    def init_sprites():
+        ### Initialize sprites ###
+        ### Copy sprite data from tuples to VIC bank memory ###
+        # Mapped arrays with tuple initialization (automatic optimized copy)
+        cannon_ready: array[byte, 64][SPRITE_DATA_ADDR] = CANNON_SPRITE_READY
+        cannon_fired: array[byte, 64][SPRITE_DATA_ADDR + 64] = CANNON_SPRITE_FIRED
+        bullet_data: array[byte, 64][SPRITE_DATA_ADDR + 128] = BULLET_SPRITE
+        sparkle_data: array[byte, 64][SPRITE_DATA_ADDR + 192] = SPARKLE_SPRITE_DENSE
+        ### Sprite 0: cannon (multicolor), Sprite 1: bullet (hires), Sprite 2: sparkle ###
+        sparkle_phase: byte[ZP_SPARKLE_PHASE]
+
+        # Setup multicolor mode for cannon sprite
+        Screen.sprite_mc1 = DARK_GREY   # Multicolor 1 ($D025)
+        Screen.sprite_mc2 = CYAN        # Multicolor 2 ($D026)
+        Screen.sprite_multicolor = 0x01 # Only sprite 0 is multicolor
+
+        # Setup sprite 0: cannon
+        Screen.sprite_ptr[0] = CANNON_BLOCK_READY
+        Screen.sprite_color[0] = GREY   # Sprite 0 individual color
+
+        # Setup sprite 1: bullet (hires, not multicolor)
+        Screen.sprite_ptr[1] = BULLET_BLOCK
+        Screen.sprite_color[1] = COLOR_BULLET
+
+        # Setup sprite 2: sparkle (hires, single sprite with color fade)
+        Screen.sprite_color[2] = COLOR_SPARKLE_1  # Initial color (will change during animation)
+        Screen.sprite_ptr[2] = SPARKLE_BLOCK      # Sparkle pattern
+        sparkle_phase = 0  # Sparkle starts inactive
+
+        # Sprites in front of background
+        Screen.sprite_priority = 0x00
+
+        # Initialize ZP variables
+        self.cannon_row_zp = 4  # Start in middle
+        self.cannon_target_zp = byte(PLAY_TOP * 8 + 4 * 16 + SPRITE_Y_OFFSET)
+        self.cannon_current_zp = self.cannon_target_zp
+        self.bullet_active_zp = 0
+        self.bullet_hit_zp = 0
+        self.sprite_en_zp = 0x03  # Enable both sprites (cannon + bullet inside barrel)
+
+        # Enable both sprites (bullet sprite always visible, follows cannon when not fired)
+        Screen.sprite_enable = 0x03
+
+        # Set cannon initial position
+        Screen.sprite_x[0] = CANNON_SPRITE_X  # Sprite 0 X
+        Screen.sprite_x[1] = self.cannon_current_zp  # Sprite 0 Y
+
+        # Set bullet sprite initial position (inside cannon barrel)
+        Screen.sprite_x[2] = CANNON_SPRITE_X  # Sprite 1 X
+        Screen.sprite_x[3] = self.cannon_current_zp  # Sprite 1 Y
+
+    def cleanup():
+        ### Clean up game resources (IRQ, sprites) ###
+        # Disable raster IRQ and reset handler
+        __set_irq__(irq_screen_handler)
+        __set_raster__(TITLE_RASTER_TO_BITMAP)
+        # Disable all sprites
+        Screen.sprite_enable = 0
+
+    def cannon_move_up():
+        ### Move cannon up (sets target Y, IRQ handles smooth movement) ###
+        row: byte
+        row = self.cannon_row_zp
+        if row > 0:
+            row -= 1
+            self.cannon_row_zp = row
+            self.cannon_target_zp = byte(PLAY_TOP * 8 + word(row) * 16 + SPRITE_Y_OFFSET)
+
+    def cannon_move_down():
+        ### Move cannon down ###
+        row: byte
+        row = self.cannon_row_zp
+        if row < GRID_HEIGHT - 1:
+            row += 1
+            self.cannon_row_zp = row
+            self.cannon_target_zp = byte(PLAY_TOP * 8 + word(row) * 16 + SPRITE_Y_OFFSET)
+
+    def fire_bullet():
+        ### Fire bullet (sets ZP variables, IRQ handles movement) ###
+        start_x: word
+        start_y: byte
+
+        # Can't fire if bullet already active, effect is playing, or cascade is active
+        if self.bullet_active_zp != 0 or self.effect_phase != 0 or self.cascade_phase != CASCADE_IDLE:
+            return
+
+        # Can't fire if out of points - GAME OVER!
+        if self.score == 0:
+            # Hide bullet sprite for game over screen
+            self.sprite_en_zp = self.sprite_en_zp & 0xFD
+            Screen.sprite_enable = self.sprite_en_zp
+            self.game_over = True
+            self.running = False
+            return
+
+        # Each shot costs 1 point
+        self.score -= 1
+        self.update_status()
+
+        # Switch cannon sprite to "fired" state (empty barrel)
+        Screen.sprite_ptr[0] = CANNON_BLOCK_FIRED
+
+        # Calculate starting position (bullet starts at cannon position)
+        start_x = word(CANNON_SPRITE_X)
+        # Y position calculated from grid row, not interpolated sprite position!
+        # This ensures bullet starts at correct row even if cannon is mid-movement
+        start_y = byte(PLAY_TOP * 8 + word(self.cannon_row_zp) * 16 + SPRITE_Y_OFFSET)
+
+        # Set bullet ZP variables (store cannon row at firing time!)
+        # CRITICAL: Set active flag LAST! IRQ checks this first before using other values.
+        self.bullet_x_zp = start_x
+        self.bullet_y_zp = start_y
+        self.bullet_hit_zp = 0
+        self.bullet_row_zp = self.cannon_row_zp  # Lock in the row!
+        self.bullet_active_zp = 1  # Enable AFTER all values are set!
+
+        # Enable bullet sprite (may have been hidden by collision in IRQ)
+        self.sprite_en_zp = self.sprite_en_zp | 0x02
+        Screen.sprite_enable = self.sprite_en_zp
+
+    def handle_input():
+        key: char
+        key = getkey()
+
+        if key == KEY_UP or key == KEY_W or key == KEY_W_LOWER:
+            self.cannon_move_up()
+        elif key == KEY_DOWN or key == KEY_S or key == KEY_S_LOWER:
+            self.cannon_move_down()
+        elif key == KEY_SPACE:
+            self.fire_bullet()
+        elif key == KEY_N or key == KEY_N_LOWER:
+            self.running = False
+
+    def handle_bullet_hit():
+        ### Handle bullet hit - IRQ already placed block ###
+        hit_col: byte
+
+        if self.bullet_hit_zp == 0:
+            return
+
+        self.bullet_hit_zp = 0
+        hit_col = self.bullet_hit_col_zp
+
+        # Hit column 0 means no block was placed
+        if hit_col == 0:
+            if self.effect_phase == 0:
+                Screen.sprite_ptr[0] = CANNON_BLOCK_READY
+                # Re-enable bullet sprite (was hidden by IRQ on collision)
+                self.sprite_en_zp = self.sprite_en_zp | 0x02
+                Screen.sprite_enable = self.sprite_en_zp
+            return
+
+        # Check for complete columns
+        self.check_complete_columns()
+        self.update_status()
+
+        # Restore cannon sprite only if no effect started
+        if self.effect_phase == 0:
+            Screen.sprite_ptr[0] = CANNON_BLOCK_READY
+            # Re-enable bullet sprite (was hidden by IRQ on collision)
+            self.sprite_en_zp = self.sprite_en_zp | 0x02
+            Screen.sprite_enable = self.sprite_en_zp
+
+    def do_scroll():
+        ### Move grid left using blkcpy and draw new column ###
+        jiffy_lo: byte[JIFFY_LO_ADDR]
+        elapsed: byte
+
+        # Pause scrolling during effect or cascade ("time freeze")
+        # IMPORTANT: Update last_jiffy to prevent time accumulation!
+        # Without this, elapsed time during animation would be added after it ends.
+        if self.effect_phase != 0 or self.cascade_phase != CASCADE_IDLE:
+            self.last_jiffy = jiffy_lo
+            return
+
+        # If dying animation is running, wait for it to finish
+        if self.dying_phase != 0:
+            return
+
+        # If scroll is NOT pending, check timer and do aging
+        if not self.scroll_pending:
+            # Handle bullet hit detected by IRQ BEFORE scroll
+            # This processes gravity and effects before the grid moves
+            self.handle_bullet_hit()
+
+            # Delta timing using jiffy clock (60 Hz, platform independent)
+            # Byte subtraction automatically handles wraparound (0-255)
+            elapsed = jiffy_lo - self.last_jiffy
+            self.last_jiffy = jiffy_lo
+            self.move_timer = self.move_timer + word(elapsed)
+            if self.move_timer < self.column_speed:
+                return
+
+            self.move_timer = 0
+
+            # Age player blocks BEFORE scroll (WHITE → LIGHT_GREY → GREY → DARK_GREY)
+            # DARK_GREY blocks get added to dying list for flash animation
+            self.grid.age_player_blocks()
+
+            # Start dying animation if there are blocks to animate
+            self.start_dying_animation()
+            if self.dying_phase != 0:
+                self.scroll_pending = True  # Scroll due after animation
+                return
+
+        # Scroll is pending (or no dying animation) - do the scroll!
+        self.scroll_pending = False
+
+        # === ATOMIC SCROLL SEQUENCE ===
+        # The entire scroll + spawn + bullet_x adjustment must be atomic!
+        # If IRQ fires between scroll and bullet_x adjustment:
+        # - Grid is already shifted (scroll done)
+        # - But bullet_x still has OLD value
+        # - IRQ collision check uses OLD bullet_x with NEW grid
+        # - Result: collision check is off by 1 column → bullet passes through blocks!
+
+        # Wait for raster line 200-250 (after play area, before too late)
+        while Screen.raster < IRQ_RASTER_BOTTOM or Screen.raster > 250:
+            pass
+
+        __sei__()  # Disable IRQ for entire atomic sequence
+
+        # 1. Scroll play area left
+        Screen.scroll_play_area()
+
+        # 2. Spawn new column directly to Color RAM
+        self.grid.spawn_column()
+
+        # 3. Adjust bullet position to match shifted grid
+        if self.bullet_active_zp != 0:
+            if self.bullet_x_zp > 16:
+                self.bullet_x_zp = self.bullet_x_zp - 16
+            else:
+                self.bullet_active_zp = 0
+                Screen.sprite_ptr[0] = CANNON_BLOCK_READY
+
+        __cli__()  # NOW IRQ can run - grid and bullet_x are synchronized!
+
+        # === END ATOMIC SEQUENCE ===
+
+        # Check game over AFTER scroll - if any block reached leftmost column
+        if self.is_game_over():
+            # Switch to empty cannon sprite - the killer block shows through!
+            Screen.sprite_ptr[0] = CANNON_BLOCK_FIRED
+            # Hide bullet sprite for game over screen
+            self.sprite_en_zp = self.sprite_en_zp & 0xFD
+            Screen.sprite_enable = self.sprite_en_zp
+            self.game_over = True
+            self.running = False
+            return
+
+        # Handle any collision detected by IRQ after scroll
+        self.handle_bullet_hit()
+
+    def try_spawn_sparkle():
+        ### Try to spawn a sparkle effect on a random colored tile ###
+        sparkle_phase: byte[ZP_SPARKLE_PHASE]
+        sprite_x: array[byte, 16][SPRITE_X]
+        sprite_y: array[byte, 16][SPRITE_Y]
+        sprite_x_msb: byte[SPRITE_X_MSB]
+        grid_x: byte
+        grid_y: byte
+        screen_x: byte
+        screen_y: byte
+        pos: word
+        color: byte
+        sprite_px: word
+        sprite_py: byte
+
+        # Only spawn if sparkle sprite is free (phase == 0)
+        if sparkle_phase != 0:
+            return
+
+        # Random chance to spawn (higher = rarer, 255 = never, 0 = every frame)
+        if Random.next() < SPARKLE_SPAWN_CHANCE:
+            return
+
+        # Pick random grid position
+        grid_x = Random.range(GRID_WIDTH)   # 0-19
+        grid_y = Random.range(GRID_HEIGHT)  # 0-9
+
+        # Calculate screen position and check color
+        screen_y = PLAY_TOP + grid_y * BLOCK_HEIGHT
+        screen_x = grid_x * BLOCK_WIDTH
+        pos = self.row_offset[screen_y] + screen_x
+
+        # Check if there's a colored block here (not black)
+        color = Screen.colors[pos] & 0x0F
+        if color != BLACK:
+            # Valid position - activate sparkle!
+            # Calculate sprite pixel position
+            sprite_px = word(screen_x) * 8 + SPRITE_X_OFFSET
+            sprite_py = screen_y * 8 + SPRITE_Y_OFFSET
+
+            # Set sprite 2 position
+            sprite_x[4] = byte(sprite_px & 0xFF)
+            sprite_y[4] = sprite_py
+
+            # Handle X MSB (bit 2 for sprite 2)
+            if sprite_px > 255:
+                sprite_x_msb = sprite_x_msb | 0x04
+            else:
+                sprite_x_msb = sprite_x_msb & 0xFB
+
+            # Enable sprite 2 and set phase to start animation
+            self.sprite_en_zp = self.sprite_en_zp | 0x04
+            Screen.sprite_enable = self.sprite_en_zp
+            sparkle_phase = 1  # Start animation
+
+    def update():
+        # Sprite movement and collision detection handled by raster IRQ (irq_handler)
+        # Main loop handles grid logic, gravity, effects, and scroll
+        jiffy_lo: byte[JIFFY_LO_ADDR]
+        filled: byte
+
+        # Update cascade animation (must be before effect, as cascade may trigger effect)
+        self.update_cascade()
+
+        # Update effect animation (non-blocking state machine)
+        self.update_effect()
+
+        # Update dying blocks animation (flash before disappearing)
+        self.update_dying_blocks()
+
+        # Handle any bullet hit detected by IRQ
+        self.handle_bullet_hit()
+
+        # Grid scroll (handles timing and column generation)
+        self.do_scroll()
+
+        # Update progress bar (shows time until next column)
+        # Bar depletes from right to left as move_timer approaches column_speed
+        filled = byte(((self.column_speed - self.move_timer) * PROGRESS_BAR_WIDTH) / self.column_speed)
+        Screen.draw_progress_bar(filled)
+
+        # Update elapsed time periodically (~2x per second)
+        # jiffy_lo changes at 60Hz, so & 31 = every 32 ticks
+        if (jiffy_lo & 31) == 0:
+            self.update_time()
+
+        # Sparkle effect - random tile highlights
+        self.try_spawn_sparkle()
+
+    def draw_game_over():
+        ### Draw game over dialog with grey background (same as status bar) ###
+        x: byte
+        y: byte
+        pos: word
+        ecm_char: byte
+
+        # ECM: space + BG_STATUS offset gives dark grey background from $D023
+        ecm_char = CHAR_SPACE + BG_STATUS
+
+        for y in range(8, 16):
+            pos = self.row_offset[y]
+            for x in range(10, 30):
+                Screen.screen[pos + x] = ecm_char
+
+        Screen.print_at(15, 10, "GAME OVER!", WHITE, BG_STATUS)
+        Screen.print_at(12, 12, "PRESS ANY KEY...", LIGHT_GREY, BG_STATUS)
+
+    def loop():
+        # Main game loop
+        while self.running:
+            self.handle_input()
+            self.update()
+            Screen.wait_frames(1)
+
+        if self.game_over:
+
+            # Border flash animation (red flashing like maze.pyco win animation)
+            for _ in range(6):
+                Screen.wait_frames(1)
+                Screen.border = COLOR_GAME_OVER_FLASH
+                Screen.wait_frames(10)
+                Screen.border = COLOR_SCREEN_BORDER
+                Screen.wait_frames(8)
+
+            self.draw_game_over()
+
+            # Clear keyboard buffer (prevents instant key press from game)
+            while getkey() != 0:
+                pass
+            waitkey()
+
+        # Clean up before returning to title screen
+        self.cleanup()
+
+    def __init__(first_start: bool):
+        # Timer ZP variables (must be initialized before IRQ starts!)
+        frame_counter: byte[ZP_FRAME_COUNTER] = 0
+        game_seconds: word[ZP_GAME_SECONDS] = 0
+        jiffy_lo: byte[JIFFY_LO_ADDR]
+        level_speeds: tuple[word] = LEVEL_SPEEDS
+
+        # Set up VIC for ECM text mode (game mode)
+        Screen.set_game_mode()
+        Screen.border = COLOR_SCREEN_BORDER
+
+        self.column_speed = level_speeds[0]  # Level 1 speed from tuple
+        self.last_jiffy = jiffy_lo  # Initialize delta timing baseline
+
+        if first_start:
+            self.draw_title()
+            self.draw_status()
+        else:
+            self.update_status()
+            self.update_time()
+
+        # Initialize column pool (pre-generate random patterns)
+        self.grid.init_pool()
+
+        # Spawn initial columns to start with a populated grid
+        # NOTE: scroll first, then spawn - so the last column stays at col 19
+        for _ in range(INITIAL_COLUMNS):
+            Screen.scroll_play_area()
+            self.grid.spawn_column()
+
+        # Initialize sprites
+        self.init_sprites()
+
+        # Initialize raster IRQ (sprite updates and joystick)
+        __set_irq__(irq_handler)
+        __enable_raster_irq__(IRQ_RASTER_BOTTOM)
+
+        # Run game loop
+        self.loop()
+
+
+# =============================================================================
+# SCREEN CLASSES
+# =============================================================================
+
+class TitleScreen:
+    ### Title screen with RLE compressed Koala image and raster-split menu ###
+    # Memory-mapped destinations (VIC Bank 3)
+    # Screen RAM is SHARED between bitmap color and text menu
+    bitmap_dest: array[byte, 8000][BITMAP_ADDR] = [0]
+    screen_data: array[byte, 1000][SCREEN]
+    colorram: array[byte, 1000][COLOR] = [BLACK]
+
+    stabilizer_screen: array[byte, 40][SCREEN + 760] = [0]
+    stabilizer_color: array[byte, 40][COLOR + 760] = [BLACK]
+
+    # Menu area (rows 21-24) - uses shared screen at offset 840
+    menu_screen: array[byte, 160][SCREEN + 840] = [CHAR_SPACE]
+    menu_color: array[byte, 160][COLOR + 840]
+
+    # Menu state
+    menu_selected: byte = 0
+
+    # Row offset lookup for fast screen access
+    row_offset: tuple[word] = ROW_OFFSET_DATA
+
+    def decompress_image():
+        ### Decompress RLE image data to VIC memory ###
+        bitmap_rle: tuple[byte] = SLOTSHOT_BITMAP_RLE
+        screen_rle: tuple[byte] = SLOTSHOT_SCREEN_RLE
+        colorram_rle: tuple[byte] = SLOTSHOT_COLORRAM_RLE
+
+        # Decompress to destinations
+        rle_decompress(colorram_rle, self.colorram)
+        rle_decompress(screen_rle, self.screen_data)
+        rle_decompress(bitmap_rle, self.bitmap_dest)
+
+    def draw_menu():
+        ### Draw menu items using Screen.print_at ###
+        # bg=0 because we're in normal text mode, not ECM
+        Screen.print_center_at_offset(MENU_ROW_START, "PLAY GAME", COLOR_MENU_NORMAL, 0, -1)
+        Screen.print_center_at_offset(MENU_ROW_START + 1, "STORY", COLOR_MENU_NORMAL, 0, -1)
+        Screen.print_center_at_offset(MENU_ROW_START + 2, "ABOUT", COLOR_MENU_NORMAL, 0, -1)
+        Screen.print_center_at_offset(MENU_ROW_START + 3, "HIGH SCORES", COLOR_MENU_NORMAL, 0, -1)
+
+    def update_menu_highlight():
+        ### Update menu item colors based on selection ###
+        i: byte
+        j: byte
+        pos: word
+        color: byte
+        for i in range(MENU_ROW_START, MENU_ROW_START + MENU_ITEM_COUNT):
+            pos = self.row_offset[i]
+            if i == self.menu_selected + MENU_ROW_START:
+                color = COLOR_MENU_SELECTED
+            else:
+                color = COLOR_MENU_NORMAL
+            # Color the entire menu item (10 chars wide)
+            for j in range(13, 26):
+                self.colorram[pos + j] = color
+
+    def cleanup():
+        ### Clean up title screen resources (IRQ, etc.) ###
+        cia1_icr: byte[CIA1_ICR]
+
+        Screen.sync_raster(250)
+        memfill(self.bitmap_dest, 0)
+        memfill(self.colorram, BLACK)
+        memfill(self.screen_data, CHAR_SPACE)
+
+        __set_irq__(irq_screen_handler)
+        cia1_icr = 0x81
+
+
+    def wait_menu() -> byte:
+        # Display title screen, return selection: 0=Play, 2=Story, 3=Credits
+        key: byte
+
+        # Draw menu
+        self.draw_menu()
+        self.update_menu_highlight()
+
+        # Menu loop - wait for selection
+        while True:
+            # Check keyboard and joystick
+            key = getkey()
+            if key == KEY_UP or key == KEY_W or key == KEY_W_LOWER:
+                if self.menu_selected > 0:
+                    self.menu_selected -= 1
+                    self.update_menu_highlight()
+
+            elif key == KEY_DOWN or key == KEY_S or key == KEY_S_LOWER:
+                if self.menu_selected < MENU_ITEM_COUNT - 1:
+                    self.menu_selected += 1
+                    self.update_menu_highlight()
+
+            # SPACE or RETURN
+            elif key == KEY_SPACE or key == KEY_RETURN:
+                self.cleanup()
+                return self.menu_selected
+
+    def __init__():
+        # Initialize screen
+        Screen.set_bitmap_mode()
+        # Setup and enable raster IRQ for split screen
+        __set_irq__(irq_title_handler)
+        __enable_raster_irq__(TITLE_RASTER_TO_BITMAP)
+        # Decompress and display image
+        self.decompress_image()
+
+
+class StoryScreen:
+    ### Story screen - displays game backstory ###
+    def draw():
+        # Title - CYAN
+        Screen.print_center_at(1, "DEEP SPACE COLONY K-7", CYAN, 0)
+        Screen.print_center_at(2, "YEAR 2084", CYAN, 0)
+
+        # Opening
+        Screen.print_center_at(4, "THREE DAYS AGO IT APPEARED.", LIGHT_GREY, 0)
+
+        # Description
+        Screen.print_center_at(6, "A CRYSTALLINE MASS SPREADING", LIGHT_GREY, 0)
+        Screen.print_center_at(7, "ACROSS THE HULL.", LIGHT_GREY, 0)
+        Screen.print_center_at(8, "NO ORIGIN. NO WARNING.", LIGHT_GREY, 0)
+
+        # Drama
+        Screen.print_center_at(10, "AND IT KEEPS ACCELERATING.", WHITE, 0)
+        Screen.print_center_at(11, "WE CALL IT THE CASCADE.", WHITE, 0)
+
+        # Solution
+        Screen.print_center_at(13, "THE RESEARCH COUNCIL FOUND ONE", LIGHT_GREY, 0)
+        Screen.print_center_at(14, "WEAKNESS. WHITE MATTER", LIGHT_GREY, 0)
+        Screen.print_center_at(15, "NEUTRALIZES ENTIRE COLUMNS.", LIGHT_GREY, 0)
+
+        # Constraint
+        Screen.print_center_at(17, "BUT THE VACCINE IS UNSTABLE.", LIGHT_GREY, 0)
+        Screen.print_center_at(18, "IT DECAYS WITHIN SECONDS.", LIGHT_GREY, 0)
+        Screen.print_center_at(19, "AIM FAST. SHOOT TRUE.", WHITE, 0)
+
+        # Stakes
+        Screen.print_center_at(21, "EVACUATION IN PROGRESS", YELLOW, 0)
+        Screen.print_center_at(22, "12000 LIVES AT STAKE", YELLOW, 0)
+
+        # Prompt
+        Screen.print_center_at(24, "PRESS ANY KEY", LIGHT_BLUE, 0)
+
+    def loop():
+        visible: bool = True
+        while True:
+            for _ in range(10):
+                Screen.wait_frames(2)
+                if getkey() != 0:
+                    return
+            if visible:
+                # Hide prompt
+                Screen.print_center_at(24, "PRESS ANY KEY", BLACK, 0)
+                visible = False
+            else:
+                # Show prompt
+                Screen.print_center_at(24, "PRESS ANY KEY", LIGHT_BLUE, 0)
+                visible = True
+
+    def __init__():
+        Screen.sync_raster(250)
+        # Set game mode (ECM text mode)
+        Screen.set_game_mode()
+        # Draw story content
+        self.draw()
+        # Wait for keypress
+        self.loop()
+
+
+# =============================================================================
+# SCREEN CONTEXT FUNCTIONS
+# =============================================================================
+
+def title_screen() -> byte:
+    title_screen: TitleScreen
+    title_screen()
+    return title_screen.wait_menu()
+
+
+def story_screen():
+    story_screen: StoryScreen
+    story_screen()
+
+def game():
+    game: Game
+    game(True)
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+@noreturn
+def main():
+    # Menu selection: 0=Play, 2=Story, 3=Credits
+    menu_choice: byte
+
+    # Initialize screen hardware ONCE at startup
+    # This copies ROM charset to $C800 (needed for title menu too)
+    Screen()
+
+    # Initialize random number generator
+    Random()
+
+    # Initialize music player
+    slotshot_music_vic_init()
+
+    while True:
+        # InitializeShow title screen and get menu selection
+        menu_choice = title_screen()
+
+        if menu_choice == 0:
+            # Stop music
+            slotshot_music_stop()
+            # PLAY GAME selected
+            game()
+            # Continue music
+            slotshot_music_continue()
+
+        elif menu_choice == 1:
+            # STORY selected - TODO: show story screen
+            story_screen()
+
+        elif menu_choice == 2:
+            # ABOUT selected - TODO: show about screen
+            pass
+
+        elif menu_choice == 3:
+            # HIGH SCORES selected - TODO: show high scores screen
+            pass
+
