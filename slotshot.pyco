@@ -336,24 +336,33 @@ LEVEL_SPEEDS = (208, 185, 162, 139, 117, 106, 95, 85, 78, 70)
 # Must have len(LEVEL_SPEEDS) - 1 entries (thresholds for level 2 to max)
 LEVEL_THRESHOLDS = (200, 500, 1000, 1500, 2000, 2500, 3000, 4000, 5000)
 
-# Custom block characters (60-63) with rounded corners and 1px border
-# Each character is 8 bytes, total 32 bytes for 4 characters
-CUSTOM_CHARS_DATA = (
-    # Character 60: Top-left corner
-    0x00, 0x3F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F,
-    # Character 61: Top-right corner
-    0x00, 0xFC, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE,
-    # Character 62: Bottom-left corner
-    0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x3F, 0x00,
-    # Character 63: Bottom-right corner
-    0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFC, 0x00
-)
-
-# Progress bar character (59) - 2px thin line near top of character
-# 1px margin at top, then 2px line, rest empty
-# This creates a subtle progress indicator that doesn't dominate the status bar
-PROGRESS_CHAR_DATA = (
-    0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+# =============================================================================
+# CUSTOM CHARSET DATA
+# =============================================================================
+# All custom characters in one tuple. Format: screen_code, 8 bytes pixel data
+# 15 characters × 9 bytes = 135 bytes
+CUSTOM_CHARSET = (
+    # --- Title half-characters (split versions of S, L, O, T, H) ---
+    # OVERLAP technique: row 3 in BOTH halves for seamless vertical connection
+    # TOP half: 4 empty + 4 letter rows, BOTTOM half: 4 letter + 4 empty rows
+    # Screen codes 27-31, 34-38 (skipping 32=space, 33=!)
+    27, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x60, 0x38,  # S_TOP
+    28, 0x00, 0x0C, 0x06, 0x66, 0x3C, 0x00, 0x00, 0x00,  # S_BOTTOM
+    29, 0x00, 0x00, 0x00, 0x00, 0x60, 0x60, 0x60, 0x60,  # L_TOP
+    30, 0x00, 0x60, 0x60, 0x60, 0x7E, 0x00, 0x00, 0x00,  # L_BOTTOM
+    31, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x66, 0x66,  # O_TOP
+    34, 0x00, 0x66, 0x66, 0x66, 0x3C, 0x00, 0x00, 0x00,  # O_BOTTOM
+    35, 0x00, 0x00, 0x00, 0x00, 0x7E, 0x18, 0x18, 0x18,  # T_TOP
+    36, 0x00, 0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00,  # T_BOTTOM
+    37, 0x00, 0x00, 0x00, 0x00, 0x66, 0x66, 0x66, 0x7E,  # H_TOP
+    38, 0x00, 0x7E, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00,  # H_BOTTOM
+    # --- Progress bar character ---
+    59, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,  # 2px line near top
+    # --- Block corners (rounded, 1px border) ---
+    60, 0x00, 0x3F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F,  # Top-left
+    61, 0x00, 0xFC, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE,  # Top-right
+    62, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x3F, 0x00,  # Bottom-left
+    63, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFC, 0x00   # Bottom-right
 )
 
 # =============================================================================
@@ -433,35 +442,6 @@ SPARKLE_SPRITE_DENSE = (
 # Star sprite is generated at runtime by generate_star_sprite()
 # 2x2 pixel dot in top-left corner of sprite
 
-# Title half-characters pixel data
-# These are split versions of S, L, O, T, H for 4px vertical shift
-# OVERLAP technique: row 3 appears in BOTH halves for seamless connection!
-# This makes letters 8px tall (vs original 7px) - classic C64 big-font trick
-# TOP half: rows 0-3 at bytes 4-7 (4 empty + 4 letter)
-# BOTTOM half: rows 3-6 at bytes 0-3 (4 letter + 4 empty) - row 3 duplicated!
-# Based on C64 ROM: S=3C 66 60 3C 06 66 3C 00, L=60 60 60 60 60 60 7E 00, etc.
-HALF_CHARS_DATA = (
-    # S_TOP (27):    00 00 00 00 3C 66 60 3C (rows 0-3)
-    0x00, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x60, 0x38,
-    # S_BOTTOM (28): 3C 06 66 3C 00 00 00 00 (rows 3-6, row 3 overlaps!)
-    0x00,0x0C, 0x06, 0x66, 0x3C, 0x00, 0x00, 0x00,
-    # L_TOP (29):    00 00 00 00 60 60 60 60 (rows 0-3)
-    0x00, 0x00, 0x00, 0x00, 0x60, 0x60, 0x60, 0x60,
-    # L_BOTTOM (30): 60 60 60 7E 00 00 00 00 (rows 3-6, row 3 overlaps!)
-    0x00,0x60, 0x60, 0x60, 0x7E, 0x00, 0x00, 0x00,
-    # O_TOP (31):    00 00 00 00 3C 66 66 66 (rows 0-3)
-    0x00, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x66, 0x66,
-    # O_BOTTOM (33): 66 66 66 3C 00 00 00 00 (rows 3-6, row 3 overlaps!)
-    0x00,0x66, 0x66, 0x66, 0x3C, 0x00, 0x00, 0x00,
-    # T_TOP (34):    00 00 00 00 7E 18 18 18 (rows 0-3)
-    0x00, 0x00, 0x00, 0x00, 0x7E, 0x18, 0x18, 0x18,
-    # T_BOTTOM (35): 18 18 18 18 00 00 00 00 (rows 3-6, row 3 overlaps!)
-    0x00,0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00,
-    # H_TOP (36):    00 00 00 00 66 66 66 7E (rows 0-3)
-    0x00, 0x00, 0x00, 0x00, 0x66, 0x66, 0x66, 0x7E,
-    # H_BOTTOM (37): 7E 66 66 66 00 00 00 00 (rows 3-6, row 3 overlaps!)
-    0x00,0x7E, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00
-)
 
 # Screen codes for "SLOTSHOT" title using half-characters
 # Row 0 (top row): top halves (empty top + letter top at bottom)
@@ -950,9 +930,7 @@ class Screen:
         vic_memptr: byte[VIC_MEMPTR]
         char_rom: array[byte, 2048][CHAR_ROM]
         char_ram: array[byte, 2048][CHARSET_RAM]
-        custom_chars: tuple[byte] = CUSTOM_CHARS_DATA
-        half_chars: tuple[byte] = HALF_CHARS_DATA
-        progress_char: tuple[byte] = PROGRESS_CHAR_DATA
+        custom_chars: tuple[byte] = CUSTOM_CHARSET
         old_port: byte
         code: byte
         i: byte
@@ -972,25 +950,13 @@ class Screen:
         cpu_port = old_port
         __cli__()
 
-        # Create custom block characters (60-63) with rounded corners and 1px border
-        # Characters start at offset 480 (60 * 8), total 32 bytes for 4 chars
-        for i in range(len(custom_chars)):
-            char_ram[480 + i] = custom_chars[i]
-
-        # Create progress bar character (59) - thin line at bottom
-        # Character 59 starts at offset 472 (59 * 8)
-        for i in range(len(progress_char)):
-            char_ram[472 + i] = progress_char[i]
-
-        # Create title half-characters from pre-computed data
-        # 10 characters at screen codes 27-31, 34-38 (skip 32=space, 33=!)
-        for i in range(10):
-            code = 27 + i
-            if code >= 32:
-                code += 2  # Skip space (32) and ! (33)
-            dst = word(code) * 8  # Destination offset in char RAM
+        # Copy all custom characters from unified tuple
+        # Format: screen_code (1 byte) + pixel data (8 bytes) per character
+        for i in range(len(custom_chars) / 9):
+            code = custom_chars[i * 9]          # First byte = screen code
+            dst = word(code) * 8                # Destination offset in char RAM
             for j in range(8):
-                char_ram[dst + j] = half_chars[i * 8 + j]
+                char_ram[dst + j] = custom_chars[i * 9 + 1 + j]
 
     def sync_raster(raster: byte):
         vic_ctrl: byte[VIC_CTRL1]
