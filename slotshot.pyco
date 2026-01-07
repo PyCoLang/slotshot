@@ -264,6 +264,10 @@ COLOR_SPARKLE_1 = GREY        # Sparkle phase 1 (darker)
 COLOR_SPARKLE_2 = LIGHT_GREY  # Sparkle phase 2 (brighter)
 COLOR_GAME_OVER_FLASH = RED
 
+# HIGH SCORE CONFIGURATION
+COLOR_SCORE_BEATING_HIGH = YELLOW    # Color when current score > high score
+SCORE_DISPLAY_TOGGLE_FRAMES = 100
+
 # Dying block animation colors - plays through these colors before disappearing
 # Last color should be BLACK (block gone). len() determines phase count!
 DYING_COLORS = (GREY, LIGHT_GREY, GREY, LIGHT_GREY, GREY, WHITE, BLACK)
@@ -504,11 +508,12 @@ ZP_GAME_SECONDS = 0x3F     # word: total elapsed seconds (max ~18 hours)
 
 # Sound effects state (ZP for fast IRQ access)
 ZP_SFX_ACTIVE = 0x41       # byte: 0=off, 1=playing, 3=arpeggio
-ZP_SFX_TIMER = 0x42        # byte: remaining notes (arpeggio) or frames
+ZP_SFX_TIMER = 0x42        # byte: remaining notes (arpeggio) or frames (normal)
 ZP_SFX_FREQ = 0x43         # word: current frequency (16-bit)
 ZP_SFX_DELTA = 0x45        # sbyte: frequency delta per note (signed)
-ZP_SFX_PHASE = 0x46        # byte: frame within current note (0-2)
+ZP_SFX_PHASE = 0x46        # byte: frame counter within current note/silence
 ZP_SFX_PENDING = 0x47      # byte: frames to wait before starting clear sound
+ZP_SFX_NOTE_LEN = 0x48     # byte: note length in frames (bi-bip mode)
 
 # Paused
 ZP_PAUSED = 0x35           # byte: pause state (0=running, 1=paused)
@@ -569,7 +574,6 @@ SCORE_COLUMN_CLEAR = 10     # Base points for clearing a column
 SCORE_CASCADE_CLEAR = 15    # Base points for clearing a column via cascade
 SCORE_LEVEL_BONUS = 5       # Additional points per level (added to base)
 
-
 # =============================================================================
 # COLUMN NUMBER CONSTANTS
 # =============================================================================
@@ -596,6 +600,7 @@ class _SFXInit:
 def sfx_play_fire():
     """Cannon fire sound - short sharp noise."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
+    freq: word[SID_CH3_FREQ]
     ctrl: byte[SID_CH3_CTRL]
     ad: byte[SID_CH3_AD]
     sr: byte[SID_CH3_SR]
@@ -606,6 +611,7 @@ def sfx_play_fire():
     delta: sbyte[ZP_SFX_DELTA]
 
     curr_freq = 0xb000
+    freq = curr_freq
     ad = 0x07
     sr = 0x20
     ctrl = 0x81
@@ -618,6 +624,7 @@ def sfx_play_fire():
 def _sfx_start_clear():
     """Actually start the clear sound (called from tick after delay)."""
     # SID registers (memory-mapped)
+    freq: word[SID_CH3_FREQ]
     ctrl: byte[SID_CH3_CTRL]
     ad: byte[SID_CH3_AD]
     sr: byte[SID_CH3_SR]
@@ -627,14 +634,17 @@ def _sfx_start_clear():
     curr_freq: word[ZP_SFX_FREQ]
     delta: sbyte[ZP_SFX_DELTA]
     phase: byte[ZP_SFX_PHASE]
+    note_len: byte[ZP_SFX_NOTE_LEN]
 
     curr_freq = 0x1000
+    freq = curr_freq
     ad = 0x00
     sr = 0xF0
     ctrl = 0x11
     delta = 5
     timer = 4
     phase = 0
+    note_len = 2       # Short notes for arpeggio effect
     active = 3
 
 
@@ -642,6 +652,7 @@ def _sfx_start_clear():
 def sfx_play_hit():
     """Projectile hit sound - explosion noise. IRQ-safe."""
     # SID registers (memory-mapped)
+    freq: word[SID_CH3_FREQ]
     ctrl: byte[SID_CH3_CTRL]
     ad: byte[SID_CH3_AD]
     sr: byte[SID_CH3_SR]
@@ -652,6 +663,7 @@ def sfx_play_hit():
     delta: sbyte[ZP_SFX_DELTA]
 
     curr_freq = 0x1500
+    freq = curr_freq
     ad = 0x08
     sr = 0x00
     ctrl = 0x81
@@ -660,8 +672,35 @@ def sfx_play_hit():
     active = 1
 
 
-def sfx_play_levelup():
-    """Level up sound - short high beep."""
+def sfx_play_bibip():
+    """Bi-bip sound - two short beeps with gap."""
+    # SID registers - irq_safe because sfx_tick also writes from IRQ
+    freq: irq_safe[word[SID_CH3_FREQ]]
+    ctrl: byte[SID_CH3_CTRL]
+    ad: byte[SID_CH3_AD]
+    sr: byte[SID_CH3_SR]
+    # State (ZP) - irq_safe because sfx_tick reads these from IRQ
+    active: byte[ZP_SFX_ACTIVE]
+    timer: byte[ZP_SFX_TIMER]
+    curr_freq: irq_safe[word[ZP_SFX_FREQ]]
+    delta: sbyte[ZP_SFX_DELTA]
+    phase: byte[ZP_SFX_PHASE]
+    note_len: byte[ZP_SFX_NOTE_LEN]
+
+    curr_freq = 0x2800 # High pitch (same as levelup)
+    freq = curr_freq
+    ad = 0x00          # Instant attack/decay
+    sr = 0x80          # Medium sustain
+    ctrl = 0x11        # Triangle + gate - start first beep
+    delta = 0          # No pitch change
+    note_len = 4       # Each beep is 6 frames (~100ms)
+    timer = 2          # Two beeps total
+    phase = 0          # Frame counter starts at 0
+    active = 3         # Arpeggio mode with note_len
+
+
+def sfx_play_slide():
+    """Slide sound - quick 'sutty' swoosh upward."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
     freq: irq_safe[word[SID_CH3_FREQ]]
     ctrl: byte[SID_CH3_CTRL]
@@ -673,29 +712,8 @@ def sfx_play_levelup():
     curr_freq: irq_safe[word[ZP_SFX_FREQ]]
     delta: sbyte[ZP_SFX_DELTA]
 
-    curr_freq = 0x2800 # High pitch
-    freq = 0x2800
-    ad = 0x00          # Instant attack/decay
-    sr = 0x80          # Medium sustain
-    ctrl = 0x11        # Triangle + gate
-    delta = 0          # No pitch change
-    timer = 6          # Very short
-    active = 1
-
-
-def sfx_play_slide():
-    """Slide sound - quick 'sutty' swoosh upward."""
-    # SID registers - irq_safe because sfx_tick also writes from IRQ
-    ctrl: byte[SID_CH3_CTRL]
-    ad: byte[SID_CH3_AD]
-    sr: byte[SID_CH3_SR]
-    # State (ZP) - irq_safe because sfx_tick reads these from IRQ
-    active: byte[ZP_SFX_ACTIVE]
-    timer: byte[ZP_SFX_TIMER]
-    curr_freq: irq_safe[word[ZP_SFX_FREQ]]
-    delta: sbyte[ZP_SFX_DELTA]
-
     curr_freq = 0x2000 # Higher start
+    freq = curr_freq
     ad = 0x00          # Instant attack/decay
     sr = 0x50          # Quick fade
     ctrl = 0x81        # Noise + gate (swoosh texture)
@@ -717,6 +735,7 @@ def sfx_tick():
     delta: sbyte[ZP_SFX_DELTA]
     phase: byte[ZP_SFX_PHASE]
     pending: byte[ZP_SFX_PENDING]
+    note_len: byte[ZP_SFX_NOTE_LEN]
 
     # Handle pending clear sound (delayed start)
     if pending > 0:
@@ -733,24 +752,30 @@ def sfx_tick():
     if active == 0:
         return
 
-    # Arpeggio mode (active == 3): distinct notes with TEST bit
+    # Arpeggio mode (active == 3): repeated notes with configurable length
+    # note_len = note duration in frames, timer = number of notes
     if active == 3:
         phase += 1
-        if phase == 1:
-            # Phase 1: TEST bit ON - reset oscillator (creates silence gap)
-            ctrl = 0x18        # TEST + triangle (no gate)
-        elif phase == 2:
-            # Phase 2: Update frequency - add delta * 256 for octave jumps
-            curr_freq += word(delta) * 256
-            freq = curr_freq
-        elif phase >= 3:
-            # Phase 3: Gate ON - start new note, reset phase
-            ctrl = 0x11        # Triangle + gate (TEST off)
-            phase = 0
-            timer -= 1
-            if timer == 0:
-                ctrl = 0
-                active = 0
+        # Note playing phase
+        if phase < note_len:
+            return
+        # Switch to silence at note_len
+        if phase == note_len:
+            ctrl = 0           # Gate off (silence)
+            return
+        # Silence phase (half the note length)
+        if phase < note_len + note_len / 2:
+            return
+        # End of note cycle
+        timer -= 1
+        if timer == 0:
+            active = 0
+            return
+        # Start next note with frequency change
+        curr_freq += word(delta) * 256
+        freq = curr_freq
+        ctrl = 0x11            # Triangle + gate
+        phase = 0
         return
 
     # Normal mode (active == 1): smooth frequency slide
@@ -826,7 +851,7 @@ def joy_handler():
 
 @irq
 def irq_handler(vic: byte, cia1: byte):
-    ### Raster IRQ - updates sprite positions and reads joystick every frame ###
+    """Raster IRQ - updates sprite positions and reads joystick every frame."""
     # ZP variables for sprite state (shared with main loop)
     target_y: byte[ZP_CANNON_TARGET_Y]
     current_y: byte[ZP_CANNON_CURRENT_Y]
@@ -1002,7 +1027,7 @@ def irq_handler(vic: byte, cia1: byte):
         frame_counter += 1
         if frame_counter >= 60 and not paused:
             frame_counter = 0
-            game_seconds = game_seconds + 1
+            game_seconds += 1
 
         # --- Update star visibility based on Color RAM ---
         star_mask = 0xF8  # Start with all stars enabled
@@ -1019,7 +1044,7 @@ def irq_handler(vic: byte, cia1: byte):
 
 @irq
 def irq_title_handler(vic: byte, cia1: byte):
-    ### Split screen IRQ for title screen - raster-based bitmap/text mode switching ###
+    """Split screen IRQ for title screen - raster-based bitmap/text mode switching."""
     # VIC registers
     raster: byte[VIC_RASTER]
     vic_ctrl1: byte[VIC_CTRL1]
@@ -1076,7 +1101,7 @@ def irq_title_handler(vic: byte, cia1: byte):
 
 @irq
 def irq_screen_handler(vic: byte, cia1: byte):
-    ### Screen IRQ handler ###
+    """Screen IRQ handler."""
     if vic & 0x01:
         # Acknowledge VIC interrupt
         vic = 0x01
@@ -1097,6 +1122,7 @@ def irq_screen_handler(vic: byte, cia1: byte):
 
 @singleton
 class Screen:
+    """ Screen class for hardware access """
     screen: array[byte, 1000][SCREEN] = [0]
     colors: array[byte, 1000][COLOR] = [COLOR_BLACK]
     border: byte[BORDER]
@@ -1129,8 +1155,10 @@ class Screen:
     row_offset: tuple[word] = ROW_OFFSET_DATA
 
     def init_play_area():
-        ### Fill play area with block characters - colors determine visibility ###
-        ### BLACK color = invisible block, any other color = visible block ###
+        """
+        Fill play area with block characters - colors determine visibility.
+        BLACK color = invisible block, any other color = visible block.
+        """
         pos: word
         screen_y: byte
         x: byte
@@ -1157,7 +1185,7 @@ class Screen:
                 pos += BLOCK_WIDTH
 
     def init_charset():
-        ### Initialize charset by copying ROM to RAM, create custom chars, enable ECM ###
+        """Initialize charset by copying ROM to RAM, create custom chars, enable ECM."""
         cpu_port: byte[CPU_PORT]
         vic_memptr: byte[VIC_MEMPTR]
         char_rom: array[byte, 2048][CHAR_ROM]
@@ -1198,7 +1226,7 @@ class Screen:
             pass
 
     def wait_frames(count: byte):
-        ### Wait for multiple frames ###
+        """Wait for multiple frames."""
         vic_ctrl: byte[VIC_CTRL1]
         for _ in range(count):
             # Wait for lower border
@@ -1216,7 +1244,7 @@ class Screen:
         # Fill play area with block characters (color determines visibility)
         self.init_play_area()
         __sei__()
-        ### Configure VIC for ECM text mode (game) ###
+        # Configure VIC for ECM text mode (game)
         self.vic_memptr = GAME_MEMPTR
         # ECM ON (bit 6), DEN ON (bit 4), Bitmap OFF (bit 5), preserve raster MSB (bit 7 masked)
         self.vic_ctrl1 = (self.vic_ctrl1 & 0x9F) | TITLE_VIC_ECM_MODE | VIC_DEN
@@ -1227,7 +1255,7 @@ class Screen:
         __cli__()
 
     def set_bitmap_mode():
-        ### Configure VIC for multicolor bitmap mode (title screen) ###
+        """Configure VIC for multicolor bitmap mode (title screen)."""
         # Set background and border colors
         self.border = SLOTSHOT_BGCOLOR
         self.background = SLOTSHOT_BGCOLOR
@@ -1240,7 +1268,7 @@ class Screen:
         self.init_charset()
 
     def scroll_play_area():
-        ### Scroll Color RAM 2 chars left - caller handles raster sync and SEI/CLI! ###
+        """Scroll Color RAM 2 chars left - caller handles raster sync and SEI/CLI!"""
         offset: word
         # Just the blkcpy - caller is responsible for:
         # 1. Raster sync
@@ -1249,7 +1277,7 @@ class Screen:
         blkcpy(self.colors, offset + 2, self.colors, offset, 38, 20, 40)
 
     def print_at(x: byte, y: byte, text: alias[string], col: byte, bg: byte):
-        ### Print text with ECM background select (bg = BG_PLAY/BG_TITLE/BG_STATUS/BG_HIGHLIGHT) ###
+        """Print text with ECM background select (bg = BG_PLAY/BG_TITLE/BG_STATUS/BG_HIGHLIGHT)."""
         pos: word
         i: byte
         code: byte
@@ -1269,15 +1297,15 @@ class Screen:
             pos += 1
 
     def print_center_at_offset(y: byte, text: alias[string], col: byte, bg: byte, offset: sbyte):
-        ### Print text centered at the given y position with an offset ###
+        """Print text centered at the given y position with an offset."""
         self.print_at(20 - len(text) / 2 + offset, y, text, col, bg)
 
     def print_center(y: byte, text: alias[string], col: byte, bg: byte):
-        ### Print text centered at the given y position###
+        """Print text centered at the given y position."""
         self.print_center_at_offset(y, text, col, bg, 0)
 
     def print_number(x: byte, y: byte, num: word, digits: byte, col: byte, bg: byte):
-        ### Print number with ECM background select ###
+        """Print number with ECM background select."""
         pos: word
         digit_arr: array[byte, 5]
         digit_count: byte
@@ -1309,9 +1337,11 @@ class Screen:
             pos += 1
 
     def draw_progress_bar(filled: byte):
-        ### Draw progress bar with Commodore rainbow colors ###
-        ### filled = number of characters to show (0-40), depletes from right to left ###
-        ### Depleted segments show dark grey line instead of disappearing ###
+        """
+        Draw progress bar with Commodore rainbow colors.
+        filled = number of characters to show (0-40), depletes from right to left.
+        Depleted segments show dark grey line instead of disappearing.
+        """
         rainbow: tuple[byte] = COMMODORE_RAINBOW_DATA
         pos: word
         i: byte
@@ -1341,7 +1371,7 @@ class Screen:
 
 @singleton
 class Sprites:
-    ### Sprite data storage and initialization ###
+    """Sprite data storage and initialization."""
     # Mapped arrays in VIC bank 3 ($C000-$CFFF)
     cannon_ready: array[byte, 64][SPRITE_DATA_ADDR]
     cannon_fired: array[byte, 64][SPRITE_DATA_ADDR + 64]
@@ -1350,7 +1380,7 @@ class Sprites:
     star_data: array[byte, 64][SPRITE_DATA_ADDR + 256]
 
     def __init__():
-        ### Initialize all sprite data - call once at startup ###
+        """Initialize all sprite data - call once at startup."""
         # Copy sprite patterns to VIC bank
         cannon_src: tuple[byte] = CANNON_SPRITE_READY
         cannon_fired_src: tuple[byte] = CANNON_SPRITE_FIRED
@@ -1367,7 +1397,7 @@ class Sprites:
         self.star_data[0] = 0xC0  # %11000000 = leftmost 2 pixels
 
     def init_stars(positions: tuple[word], color: byte):
-        ### Initialize star sprites (sprites 3-7) ###
+        """Initialize star sprites (sprites 3-7)."""
         i: byte
         x: word
         star_count: byte
@@ -1398,10 +1428,12 @@ class Sprites:
 
 @singleton
 class Random:
-    # 16-bit Galois LFSR with dual-byte mixing.
-    # Combines high byte (better stats) with low byte (faster change).
-    # Counter adds extra variation with coprime step.
-    # Period: 65535 (visits every non-zero 16-bit value exactly once)
+    """
+    16-bit Galois LFSR with dual-byte mixing.
+    Combines high byte (better stats) with low byte (faster change).
+    Counter adds extra variation with coprime step.
+    Period: 65535 (visits every non-zero 16-bit value exactly once)
+    """
     state: word[RANDOM_STATE_ADDR]
     state_lo: byte[RANDOM_STATE_ADDR]      # Direct access to low byte
     state_hi: byte[RANDOM_STATE_ADDR + 1]  # Direct access to high byte
@@ -1411,11 +1443,11 @@ class Random:
     counter: byte[RANDOM_COUNTER_ADDR]     # Counter for extra randomness
 
     def __init__():
-        # Seed from jiffy clock XOR raster for maximum entropy
+        """Seed from jiffy clock XOR raster for maximum entropy"""
         self.state = (self.jiffy ^ (word(self.raster) << 1)) | 0x0100
 
     def next() -> byte:
-        # Single LFSR step - polynomial x^16 + x^14 + x^13 + x^11 + 1
+        """Single LFSR step - polynomial x^16 + x^14 + x^13 + x^11 + 1"""
         if self.state & 1:
             self.state = (self.state >> 1) ^ 0xB400
         else:
@@ -1427,12 +1459,32 @@ class Random:
         return (self.state_hi ^ self.state_lo) ^ self.counter
 
     def range(max_val: byte) -> byte:
-        # For non-power-of-2 values (still has modulo bias)
+        """For non-power-of-2 values (still has modulo bias)"""
         return self.next() % max_val
 
     def range_mask(mask: byte) -> byte:
-        # FAST! Use for power-of-2 ranges: range_mask(0x1F) = 0-31
+        """FAST! Use for power-of-2 ranges: range_mask(0x1F) = 0-31"""
         return self.next() & mask
+
+
+# =============================================================================
+# HIGH SCORE SINGLETON
+# =============================================================================
+
+@singleton
+class HighScore:
+    value: word = 0
+
+    def update(score: word):
+        """Update high score if new score is higher."""
+        if score > self.value:
+            self.value = score
+
+    def is_beaten(score: word) -> bool:
+        """Returns True if current score exceeds high score (but not if high score is 0)."""
+        if self.value == 0:
+            return False
+        return score > self.value
 
 
 # =============================================================================
@@ -1440,9 +1492,10 @@ class Random:
 # =============================================================================
 
 class Grid:
-    # No cells array! Color RAM is the single source of truth.
-    # No buffer needed! Direct blkcpy from pool to Color RAM.
-
+    """
+    Block management
+    Color RAM is the single source of truth.
+    """
     # Pre-generated column patterns (10 bytes each, size from COLUMN_POOL_SIZE)
     column_pool: array[byte, COLUMN_POOL_SIZE * GRID_HEIGHT][COLUMN_POOL_ADDR]
 
@@ -1454,7 +1507,7 @@ class Grid:
     row_offset: tuple[word] = ROW_OFFSET_DATA
 
     def init_pool():
-        ### Pre-generate column patterns at startup ###
+        """Pre-generate column patterns at startup."""
         block_colors: tuple[byte] = BLOCK_COLORS_DATA
         col: byte
         row: byte
@@ -1483,8 +1536,10 @@ class Grid:
             offset += 10
 
     def get_color(col: byte, row: byte) -> byte:
-        ### Get block color from Color RAM (BLACK = empty) ###
-        ### NOTE: Color RAM is 4-bit only! Upper 4 bits are garbage on read! ###
+        """
+        Get block color from Color RAM (BLACK = empty).
+        NOTE: Color RAM is 4-bit only! Upper 4 bits are garbage on read!
+        """
         sx: byte
         sy: byte
         sx = col * BLOCK_WIDTH
@@ -1492,14 +1547,18 @@ class Grid:
         return Screen.colors[self.row_offset[sy] + sx] & 0x0F
 
     def grid_to_screen_x(col: byte) -> byte:
+        """Convert grid column to screen X position."""
         return col * BLOCK_WIDTH
 
     def grid_to_screen_y(row: byte) -> byte:
+        """Convert grid row to screen Y position."""
         return PLAY_TOP + row * BLOCK_HEIGHT
 
     def spawn_column():
-        ### Pick random column from pool and blit directly to Color RAM ###
-        ### Uses 4 blkcpy calls with dual-stride for 2x2 block expansion ###
+        """
+        Pick random column from pool and blit directly to Color RAM.
+        Uses 4 blkcpy calls with dual-stride for 2x2 block expansion.
+        """
         pool_offset: word
         offset: word
 
@@ -1524,9 +1583,11 @@ class Grid:
         blkcpy(self.column_pool, pool_offset, 1, Screen.colors, offset + 41, 80, 1, 10)
 
     def age_player_blocks():
-        ### Age player-placed blocks: WHITE → LIGHT_GREY → GREY → DARK_GREY ###
-        ### DARK_GREY blocks are added to dying list for flash animation ###
-        ### Called once per scroll, so blocks disappear after 4 scrolls ###
+        """
+        Age player-placed blocks: WHITE → LIGHT_GREY → GREY → DARK_GREY.
+        DARK_GREY blocks are added to dying list for flash animation.
+        Called once per scroll, so blocks disappear after 4 scrolls.
+        """
         base_pos: word
         pos: word
         color: byte
@@ -1566,7 +1627,7 @@ class Grid:
                 Screen.colors[pos + 41] = color
 
     def is_column_complete(col: byte) -> bool:
-        ### Check if column is complete (all rows have blocks) - Color RAM based ###
+        """Check if column is complete (all rows have blocks) - Color RAM based."""
         row: byte
         for row in range(GRID_HEIGHT):
             if not self.get_color(col, row):
@@ -1574,6 +1635,7 @@ class Grid:
         return True
 
     def has_block(col: byte) -> bool:
+        """Check if column has a block."""
         row: byte
         for row in range(GRID_HEIGHT):
             if self.get_color(col, row):
@@ -1581,9 +1643,11 @@ class Grid:
         return False
 
     def remove_complete_column(col: byte):
-        ### Remove complete column and shift LEFT columns to the RIGHT ###
-        ### This "pushes back" the blocks, giving the player more space! ###
-        ### NOTE: Flash effect is handled by Game.update_effect() state machine ###
+        """
+        Remove complete column and shift LEFT columns to the RIGHT.
+        This "pushes back" the blocks, giving the player more space!
+        NOTE: Flash effect is handled by Game.update_effect() state machine.
+        """
         c: byte
         src_offset: word
         dst_offset: word
@@ -1606,6 +1670,9 @@ class Grid:
 # =============================================================================
 
 class Game:
+    """
+    Main game logic
+    """
     grid: Grid
 
     score: word = INITIAL_SCORE
@@ -1645,6 +1712,11 @@ class Game:
     scroll_pending: bool = False  # Scroll waiting for dying animation to finish
     level_flash: byte = 0         # Level-up flash counter (10=5 flashes, counts down)
 
+    # High score display alternation
+    score_display_timer: word = 0        # Frame counter for alternation
+    showing_high_score: bool = False     # True = show high score, False = show current score
+    high_score_beaten: bool = False      # True = already beat high score this game (for sound)
+
     # ZP variable mappings for IRQ communication
     cannon_row_zp: byte[ZP_CANNON_ROW]
     cannon_target_zp: byte[ZP_CANNON_TARGET_Y]
@@ -1661,49 +1733,66 @@ class Game:
     row_offset: tuple[word] = ROW_OFFSET_DATA
 
     def draw_title():
-        ### Draw title bar (rows 0-1) with ECM background and half-characters ###
+        """Draw title bar (rows 0-1) with ECM background and half-characters."""
+        screen_title: array[byte, 80][SCREEN] = [CHAR_SPACE + BG_TITLE]
         title_row0: tuple[byte] = TITLE_ROW0  # Bottom halves
         title_row1: tuple[byte] = TITLE_ROW1  # Top halves
         x: byte
-        pos: word
-        ecm_char: byte
         color: byte
-
-        # ECM: space + BG_TITLE offset gives blue background from $D022
-        ecm_char = CHAR_SPACE + BG_TITLE
-
-        # Fill both rows with blue background (text color will be set per-character)
-        for x in range(40):
-            pos = self.row_offset[0] + x
-            Screen.screen[pos] = ecm_char
-            Screen.colors[pos] = COLOR_TITLE_TEXT
-            Screen.screen[pos + 40] = ecm_char
-            Screen.colors[pos + 40] = COLOR_TITLE_TEXT
 
         # Draw "SLOTSHOT" using half-characters (8 letters, centered at column 16)
         # Row 0: bottom halves (these appear at top of title bar)
         # Row 1: top halves (these appear at bottom of title bar)
-        pos = self.row_offset[0] + 16
         for x in range(8):
-            Screen.screen[pos + x] = title_row0[x] + BG_TITLE
-            Screen.screen[pos + 40 + x] = title_row1[x] + BG_TITLE
+            Screen.screen[16+ x] = title_row0[x] + BG_TITLE
+            Screen.screen[16 + 40 + x] = title_row1[x] + BG_TITLE
             # Apply gradient: every 2 characters change color
             if x < 4:
                 color = WHITE
             else:
                 color = LIGHT_GREY
-            Screen.colors[pos + x] = color
-            Screen.colors[pos + 40 + x] = color
+            Screen.colors[16 + x] = color
+            Screen.colors[16 + 40 + x] = color
 
     def update_status():
-        Screen.print_number(8, 23, self.score, 5, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
-        Screen.print_number(8, 24, self.cols_cleared, 5, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
-        # Skip level update if flash animation is active (update_level_flash handles it)
+        """Update status bar"""
+        score_color: byte
+        display_value: word
+
+        Screen.print_number(8, 23, self.cols_cleared, 5, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
         if self.level_flash == 0:
             Screen.print_number(20, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
 
+        # Show "H-" prefix and high score, or current score
+        if self.showing_high_score and HighScore.value > 0:
+            Screen.print_at(0, 24, "H-", COLOR_STATUS_TEXT, BG_STATUS)
+            display_value = HighScore.value
+            score_color = COLOR_STATUS_TEXT
+        else:
+            Screen.print_at(0, 24, "  ", COLOR_STATUS_TEXT, BG_STATUS)
+            display_value = self.score
+            # Highlight if beating high score
+            if HighScore.is_beaten(self.score):
+                score_color = COLOR_SCORE_BEATING_HIGH
+                # Play sound once when first beating high score
+                if not self.high_score_beaten:
+                    self.high_score_beaten = True
+                    sfx_play_bibip()
+            else:
+                score_color = COLOR_STATUS_TEXT_HIGHLIGHT
+        Screen.print_number(8, 24, display_value, 5, score_color, BG_STATUS)
+        # Skip level update if flash animation is active (update_level_flash handles it)
+
+    def update_score_display():
+        """Handle alternating score/high score display (call every frame)."""
+        self.score_display_timer += 1
+        if self.score_display_timer >= SCORE_DISPLAY_TOGGLE_FRAMES:
+            self.score_display_timer = 0
+            self.showing_high_score = not self.showing_high_score
+            self.update_status()  # Refresh display on toggle
+
     def update_level_flash():
-        ### Animate level number flashing on level-up (inverse effect) ###
+        """Animate level number flashing on level-up (inverse effect)."""
         phase: byte
         if self.level_flash == 0:
             return
@@ -1717,7 +1806,7 @@ class Game:
         self.level_flash -= 1
 
     def update_time():
-        ### Update elapsed time display on status bar ###
+        """Update elapsed time display on status bar."""
         # Uses IRQ-based game_seconds counter (immune to jiffy clock overflow)
         game_seconds: word[ZP_GAME_SECONDS]
         minutes: byte
@@ -1727,13 +1816,11 @@ class Game:
         secs = game_seconds % 60
 
         # Display at position 32: "T:00:00"
-        Screen.print_number(20, 24, word(minutes / 10), 1, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
-        Screen.print_number(21, 24, word(minutes % 10), 1, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
-        Screen.print_number(23, 24, word(secs / 10), 1, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
-        Screen.print_number(24, 24, word(secs % 10), 1, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(20, 24, minutes, 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(23, 24, secs, 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
 
     def draw_pause():
-        ### Highlight PAUSE text in status bar ###
+        """Highlight PAUSE text in status bar."""
         bg_color: byte
         fg_color: byte
         fg_color_text: byte
@@ -1749,22 +1836,13 @@ class Game:
         Screen.print_at(36, 23, "AUSE", fg_color_text, BG_STATUS)
 
     def draw_status():
-        ### Draw status bar (rows 22-24) with ECM background ###
+        """Draw status bar (rows 22-24) with ECM background."""
         x: byte
         pos: word
-        ecm_char: byte
+        screen_status: array[byte, 80][SCREEN + 40 * 23] = [CHAR_SPACE + BG_STATUS]
 
-        # ECM: space + BG_STATUS offset gives dark grey background from $D023
-        ecm_char = CHAR_SPACE + BG_STATUS
-
-        for x in range(40):
-            pos = self.row_offset[22] + x
-            Screen.screen[pos] = ecm_char
-            Screen.screen[pos + 40] = ecm_char
-            Screen.screen[pos + 80] = ecm_char
-
-        Screen.print_at(2, 23, "SCORE:", COLOR_STATUS_TEXT, BG_STATUS)
-        Screen.print_at(0, 24, "CLEARED:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(2, 24, "SCORE:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(0, 23, "CLEARED:", COLOR_STATUS_TEXT, BG_STATUS)
         Screen.print_at(14, 23, "LEVEL:", COLOR_STATUS_TEXT, BG_STATUS)
         Screen.print_at(15, 24, "TIME:", COLOR_STATUS_TEXT, BG_STATUS)
         Screen.print_at(22, 24, ":", COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
@@ -1781,7 +1859,7 @@ class Game:
         Screen.draw_progress_bar(PROGRESS_BAR_WIDTH)
 
     def is_game_over() -> bool:
-        ### Check if any block reached leftmost column (game over condition) ###
+        """Check if any block reached leftmost column (game over condition)."""
         row: byte
         for row in range(GRID_HEIGHT):
             if self.grid.get_color(0, row):
@@ -1789,7 +1867,7 @@ class Game:
         return False
 
     def start_effect(col: byte):
-        ### Start column clear effect animation ###
+        """Start column clear effect animation."""
         row: byte
         sx: byte
         pos: word
@@ -1815,8 +1893,10 @@ class Game:
 
 
     def check_complete_columns():
-        ### Check for complete columns and start effect if found ###
-        ### Only one effect can run at a time ###
+        """
+        Check for complete columns and start effect if found.
+        Only one effect can run at a time.
+        """
         col: byte
 
         # Don't start new effect if one is already running or cascade is active
@@ -1831,13 +1911,14 @@ class Game:
                 return
 
     def update_col_num():
-        ### Update the column number display ###
+        """Update the column number"""
         col: byte
         n: byte = 0
         for col in range(GRID_WIDTH, 0, -1):
             if self.grid.has_block(col - 1):
                 n += 1
 
+        # Play music if column number is greater than COLUMN_START_MUSIC
         if not self.music_enabled:
             if n >= COLUMN_START_MUSIC:
                 slotshot_music_vic_init()
@@ -1848,10 +1929,12 @@ class Game:
             self.music_enabled = False
 
     def find_cascade_opportunity() -> bool:
-        ### Find next row that can slide right ###
-        ### Searches from cascade_scan_row onwards ###
-        ### Only searches columns up to cascade_max_col (blocks right of removed column don't cascade) ###
-        ### Returns True if found, sets cascade_row, cascade_src_col, cascade_dst_col ###
+        """
+        Find next row that can slide right.
+        Searches from cascade_scan_row onwards.
+        Only searches columns up to cascade_max_col (blocks right of removed column don't cascade).
+        Returns True if found, sets cascade_row, cascade_src_col, cascade_dst_col.
+        """
         row: byte
         col: byte
         first_block_col: byte
@@ -1911,17 +1994,21 @@ class Game:
         return False
 
     def start_cascade_scan():
-        ### Start scanning for cascade opportunities ###
-        ### Called after column effect completes ###
-        ### Only searches columns LEFT of the removed column (effect_col) ###
+        """
+        Start scanning for cascade opportunities.
+        Called after column effect completes.
+        Only searches columns LEFT of the removed column (effect_col).
+        """
         self.cascade_phase = CASCADE_SCAN
         self.cascade_scan_row = 0
         self.cascade_frame = 0
         self.cascade_max_col = self.effect_col  # Only search up to this column
 
     def update_cascade_slide():
-        ### Animate horizontal slide - 1 character per 2 frames (smooth) ###
-        ### 2 steps = 1 block, chars stay in place (TL stays TL, etc) ###
+        """
+        Animate horizontal slide - 1 character per 2 frames (smooth).
+        2 steps = 1 block, chars stay in place (TL stays TL, etc).
+        """
         cx: byte
         src_pos: word
         color: byte
@@ -1989,14 +2076,14 @@ class Game:
         self.cascade_frame += 1
 
     def update_cascade_settle():
-        ### Brief settle pause after slide ###
+        """Brief settle pause after slide."""
         self.cascade_frame += 1
         if self.cascade_frame >= 3:  # 3 frames settle
             self.cascade_phase = CASCADE_CHECK
             self.cascade_frame = 0
 
     def update_cascade_check():
-        ### Check for complete columns after cascade ###
+        """Check for complete columns after cascade."""
         col: byte
 
         # Look for complete columns
@@ -2013,7 +2100,7 @@ class Game:
         self.cascade_phase = CASCADE_SCAN
 
     def update_cascade():
-        ### Main cascade state machine - call every frame ###
+        """Main cascade state machine - call every frame."""
 
         if self.cascade_phase == CASCADE_IDLE:
             return
@@ -2047,8 +2134,10 @@ class Game:
             self.update_cascade_check()
 
     def update_effect():
-        ### Update effect state machine - call every frame ###
-        ### Returns when effect completes (removes column, updates score) ###
+        """
+        Update effect state machine - call every frame.
+        Returns when effect completes (removes column, updates score).
+        """
         cleared_thresholds: tuple[word] = CLEARED_THRESHOLDS
         level_speeds: tuple[word] = LEVEL_SPEEDS
         row: byte
@@ -2103,6 +2192,10 @@ class Game:
                 else:
                     self.score += SCORE_COLUMN_CLEAR + word(self.level - 1) * SCORE_LEVEL_BONUS
 
+                # Immediately show player's score (not H-SCORE) when scoring
+                self.showing_high_score = False
+                self.score_display_timer = 0
+
                 # Level up check (BEFORE update_status so level displays immediately!)
                 # Max level determined by len(level_speeds)
                 while self.level < len(level_speeds):
@@ -2110,7 +2203,7 @@ class Game:
                         self.level += 1
                         self.column_speed = level_speeds[self.level - 1]
                         self.level_flash = 80  # Start 5x flash animation (80 frames / 8 = 10 phases)
-                        sfx_play_levelup()
+                        sfx_play_bibip()
                     else:
                         break
 
@@ -2121,8 +2214,10 @@ class Game:
                 self.start_cascade_scan()
 
     def update_dying_blocks():
-        ### Animate dying blocks through DYING_COLORS phases ###
-        ### Called every frame, runs independently of other animations ###
+        """
+        Animate dying blocks through DYING_COLORS phases.
+        Called every frame, runs independently of other animations.
+        """
         dying_colors: tuple[byte] = DYING_COLORS
         i: byte
         pos: word
@@ -2159,14 +2254,16 @@ class Game:
                 self.grid.dying_count = 0  # Clear the dying list
 
     def start_dying_animation():
-        ### Start dying animation if there are blocks to animate ###
+        """Start dying animation if there are blocks to animate."""
         if self.grid.dying_count > 0:
             self.dying_phase = 1
             self.dying_frame = 0
 
     def init_sprites():
-        ### Initialize sprite VIC registers (data already in Sprites singleton) ###
-        ### Sprite 0: cannon (multicolor), Sprite 1: bullet (hires), Sprite 2: sparkle ###
+        """
+        Initialize sprite VIC registers (data already in Sprites singleton).
+        Sprite 0: cannon (multicolor), Sprite 1: bullet (hires), Sprite 2: sparkle.
+        """
         sparkle_phase: byte[ZP_SPARKLE_PHASE]
 
         # Initialize star sprites (3-7) for game field background
@@ -2213,7 +2310,7 @@ class Game:
         Screen.sprite_x[3] = self.cannon_current_zp  # Sprite 1 Y
 
     def cleanup():
-        ### Clean up game resources (IRQ, sprites) ###
+        """Clean up game resources (IRQ, sprites)."""
         # Disable raster IRQ and reset handler
         __set_irq__(irq_screen_handler)
         __set_raster__(TITLE_RASTER_TO_BITMAP)
@@ -2221,7 +2318,7 @@ class Game:
         Screen.sprite_enable = 0
 
     def cannon_move_up():
-        ### Move cannon up (sets target Y, IRQ handles smooth movement) ###
+        """Move cannon up (sets target Y, IRQ handles smooth movement)."""
         row: byte
         row = self.cannon_row_zp
         if row > 0:
@@ -2230,7 +2327,7 @@ class Game:
             self.cannon_target_zp = PLAY_TOP * 8 + word(row) * 16 + SPRITE_Y_OFFSET
 
     def cannon_move_down():
-        ### Move cannon down ###
+        """Move cannon down."""
         row: byte
         row = self.cannon_row_zp
         if row < GRID_HEIGHT - 1:
@@ -2239,7 +2336,7 @@ class Game:
             self.cannon_target_zp = PLAY_TOP * 8 + word(row) * 16 + SPRITE_Y_OFFSET
 
     def fire_bullet():
-        ### Fire bullet (sets ZP variables, IRQ handles movement) ###
+        """Fire bullet (sets ZP variables, IRQ handles movement)."""
         start_x: word
         start_y: byte
 
@@ -2286,6 +2383,10 @@ class Game:
         Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
 
     def handle_input():
+        """
+        Handle keyboard and joystick input.
+        Joystick is injected into keyboard buffer by IRQ, so we can use the same key handling code.
+        """
         key: char
         jiffy_lo: byte[JIFFY_LO_ADDR]
         key = getkey()
@@ -2315,7 +2416,7 @@ class Game:
             self.running = False
 
     def handle_bullet_hit():
-        ### Handle bullet hit - IRQ already placed block ###
+        """Handle bullet hit - IRQ already placed block."""
         hit_col: byte
 
         if self.bullet_hit_zp == 0:
@@ -2345,7 +2446,7 @@ class Game:
             Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
 
     def do_scroll():
-        ### Move grid left using blkcpy and draw new column ###
+        """Move grid left using blkcpy and draw new column."""
         jiffy_lo: byte[JIFFY_LO_ADDR]
         elapsed: byte
 
@@ -2434,7 +2535,7 @@ class Game:
         self.update_col_num()
 
     def try_spawn_sparkle():
-        ### Try to spawn a sparkle effect on a random colored tile ###
+        """Try to spawn a sparkle effect on a random colored tile."""
         sparkle_phase: byte[ZP_SPARKLE_PHASE]
         sprite_x: array[byte, 16][SPRITE_X]
         sprite_y: array[byte, 16][SPRITE_Y]
@@ -2510,6 +2611,9 @@ class Game:
         # Update level flash animation (5x blink on level-up)
         self.update_level_flash()
 
+        # Update score/high score alternating display
+        self.update_score_display()
+
         # Handle any bullet hit detected by IRQ
         self.handle_bullet_hit()
 
@@ -2525,28 +2629,29 @@ class Game:
         # jiffy_lo changes at 60Hz, so & 15 = every 16 ticks
         if (jiffy_lo & 15) == 0:
             self.update_time()
+            self.update_status()
 
         # Sparkle effect - random tile highlights
         self.try_spawn_sparkle()
 
     def show_game_over_window():
-        ### Draw game over dialog with grey background (same as status bar) ###
+        """Draw game over dialog with grey background (same as status bar)."""
         x: byte
         y: byte
         pos: word
-        ecm_char: byte
         pak_color: byte = LIGHT_BLUE
-
-        # ECM: space + BG_STATUS offset gives dark grey background from $D023
-        ecm_char = CHAR_SPACE + BG_STATUS
 
         for y in range(8, 16):
             pos = self.row_offset[y]
             for x in range(10, 30):
-                Screen.screen[pos + x] = ecm_char
+                Screen.screen[pos + x] = CHAR_SPACE + BG_STATUS
                 Screen.colors[pos + x] = WHITE  # This hides stars in front of window
 
         Screen.print_at(15, 10, "GAME OVER!", WHITE, BG_STATUS)
+
+        # Show "NEW HIGHSCORE!" if player beat the high score
+        if HighScore.is_beaten(self.score):
+            Screen.print_at(13, 11, "NEW HIGHSCORE!", YELLOW, BG_STATUS)
 
         while getkey() != 0:
             pass
@@ -2571,6 +2676,8 @@ class Game:
             self.update()
 
         if self.game_over:
+            # Update high score before showing game over window
+            HighScore.update(self.score)
             music_stop_fade(25)
 
             # Border flash animation (red flashing like maze.pyco win animation)
@@ -2651,7 +2758,7 @@ class Game:
 # =============================================================================
 
 class TitleScreen:
-    ### Title screen with RLE compressed Koala image and raster-split menu ###
+    """Title screen with RLE compressed Koala image and raster-split menu."""
     # Memory-mapped destinations (VIC Bank 3)
     # Screen RAM is SHARED between bitmap color and text menu
     bitmap_dest: array[byte, 8000][BITMAP_ADDR] = [0]
@@ -2672,7 +2779,7 @@ class TitleScreen:
     row_offset: tuple[word] = ROW_OFFSET_DATA
 
     def decompress_image():
-        ### Decompress RLE image data to VIC memory ###
+        """Decompress RLE image data to VIC memory."""
         bitmap_rle: tuple[byte] = SLOTSHOT_BITMAP_RLE
         screen_rle: tuple[byte] = SLOTSHOT_SCREEN_RLE
         colorram_rle: tuple[byte] = SLOTSHOT_COLORRAM_RLE
@@ -2683,14 +2790,14 @@ class TitleScreen:
         rle_decompress(bitmap_rle, self.bitmap_dest)
 
     def draw_menu():
-        ### Draw menu items using Screen.print_at ###
+        """Draw menu items using Screen.print_at."""
         # bg=0 because we're in normal text mode, not ECM
         Screen.print_center_at_offset(MENU_ROW_START, "PLAY GAME", COLOR_MENU_NORMAL, 0, -1)
         Screen.print_center_at_offset(MENU_ROW_START + 1, "STORY", COLOR_MENU_NORMAL, 0, -1)
         Screen.print_center_at_offset(MENU_ROW_START + 2, "ABOUT", COLOR_MENU_NORMAL, 0, -1)
 
     def update_menu_highlight():
-        ### Update menu item colors based on selection ###
+        """Update menu item colors based on selection."""
         i: byte
         j: byte
         pos: word
@@ -2706,7 +2813,7 @@ class TitleScreen:
                 self.colorram[pos + j] = color
 
     def cleanup():
-        ### Clean up title screen resources (IRQ, sprites, etc.) ###
+        """Clean up title screen resources (IRQ, sprites, etc.)."""
         cia1_icr: byte[CIA1_ICR]
 
         Screen.sync_raster(250)
@@ -2762,7 +2869,7 @@ class TitleScreen:
 
 
 class StoryScreen:
-    ### Story screen - displays game backstory ###
+    """Story screen - displays game backstory."""
     def draw():
         # Title - CYAN
         Screen.print_center(1, "DEEP SPACE COLONY K-7", CYAN, 0)
@@ -2824,7 +2931,7 @@ class StoryScreen:
 
 
 class AboutScreen:
-    ### About screen - game credits and instructions ###
+    """About screen - game credits and instructions."""
     def draw():
         # Title
         Screen.print_center(1, "SLOTSHOT", CYAN, 0)
