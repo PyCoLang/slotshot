@@ -316,8 +316,8 @@ TITLE_VIC_MULTICOLOR = 0x10       # $D016 bit 4
 TITLE_VIC_ECM_MODE = 0x40         # $D011 bit 6 (must be OFF for bitmap!)
 
 # Menu configuration
-MENU_ITEM_COUNT = 4               # Play, Credits, Story
-MENU_ROW_START = 21               # First menu row (screen row)
+MENU_ITEM_COUNT = 3               # Play, Credits, Story
+MENU_ROW_START = 22               # First menu row (screen row)
 
 # Menu colors
 COLOR_MENU_NORMAL = LIGHT_BLUE
@@ -341,7 +341,7 @@ LEVEL_SPEEDS = (208, 185, 161, 138, 116, 105, 94, 84, 77, 69)
 # Cleared columns needed to reach each level (cumulative)
 # Must have len(LEVEL_SPEEDS) - 1 entries (thresholds for level 2 to max)
 # Progressively harder: +15, +20, +25, +30, +35, +40, +45, +50, +55
-CLEARED_THRESHOLDS = (10, 25, 50, 75, 100, 125, 150, 175, 200)
+CLEARED_THRESHOLDS = (10, 20, 40, 60, 80, 100, 120, 140, 160, 180)
 
 # =============================================================================
 # CUSTOM CHARSET DATA
@@ -460,7 +460,7 @@ SPARKLE_SPRITE_DENSE = (
 
 # Sparkle effect constants (single sprite for efficiency)
 SPARKLE_PHASE_MAX = 3       # Color fade phases (1=dark, 2=light, 3=dark again)
-SPARKLE_SPAWN_CHANCE = 240  # Higher = rarer (200 ≈ 22% per frame when free)
+SPARKLE_SPAWN_CHANCE = 245  # Higher = rarer (200 ≈ 22% per frame when free)
 
 
 # Screen codes for "SLOTSHOT" title using half-characters
@@ -596,7 +596,6 @@ class _SFXInit:
 def sfx_play_fire():
     """Cannon fire sound - short sharp noise."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
-    freq: irq_safe[word[SID_CH3_FREQ]]
     ctrl: byte[SID_CH3_CTRL]
     ad: byte[SID_CH3_AD]
     sr: byte[SID_CH3_SR]
@@ -606,30 +605,19 @@ def sfx_play_fire():
     curr_freq: irq_safe[word[ZP_SFX_FREQ]]
     delta: sbyte[ZP_SFX_DELTA]
 
-    curr_freq = 0x5000 # Very high start - sharp
-    freq = 0x5000
-    ad = 0x04          # Instant attack, very short decay
-    sr = 0x00          # No sustain - sharp "pew"
-    ctrl = 0x81        # Noise + gate
-    delta = -10        # Fast drop
-    timer = 8          # Short but audible
-    active = 1         # Normal mode
-
-
-def sfx_play_clear():
-    """Column clear sound - cheerful rising arpeggio chime. Delayed start."""
-    # State (ZP)
-    pending: byte[ZP_SFX_PENDING]
-
-    # Just set pending - the tick function will start the sound after delay
-    pending = 1  # Wait 1 frame before starting
+    curr_freq = 0xb000
+    ad = 0x07
+    sr = 0x20
+    ctrl = 0x81
+    delta = -1000
+    timer = 9
+    active = 1
 
 
 @irq_helper
 def _sfx_start_clear():
     """Actually start the clear sound (called from tick after delay)."""
     # SID registers (memory-mapped)
-    freq: word[SID_CH3_FREQ]
     ctrl: byte[SID_CH3_CTRL]
     ad: byte[SID_CH3_AD]
     sr: byte[SID_CH3_SR]
@@ -640,22 +628,20 @@ def _sfx_start_clear():
     delta: sbyte[ZP_SFX_DELTA]
     phase: byte[ZP_SFX_PHASE]
 
-    curr_freq = 0x1000 # Starting pitch
-    freq = 0x1000
-    ad = 0x00          # Instant attack, instant decay
-    sr = 0xF0          # Max sustain, no release - continuous sound
-    ctrl = 0x11        # Triangle + gate on
-    delta = 5          # Frequency step per note
-    timer = 4          # Very short - ~4 frames
-    phase = 0          # Frame counter within note
-    active = 3         # Arpeggio mode
+    curr_freq = 0x1000
+    ad = 0x00
+    sr = 0xF0
+    ctrl = 0x11
+    delta = 5
+    timer = 4
+    phase = 0
+    active = 3
 
 
 @irq_helper
 def sfx_play_hit():
     """Projectile hit sound - explosion noise. IRQ-safe."""
     # SID registers (memory-mapped)
-    freq: word[SID_CH3_FREQ]
     ctrl: byte[SID_CH3_CTRL]
     ad: byte[SID_CH3_AD]
     sr: byte[SID_CH3_SR]
@@ -665,13 +651,12 @@ def sfx_play_hit():
     curr_freq: word[ZP_SFX_FREQ]
     delta: sbyte[ZP_SFX_DELTA]
 
-    curr_freq = 0x1000
-    freq = 0x1000
-    ad = 0x09          # Short attack, medium decay
-    sr = 0x00          # No sustain, instant release
-    ctrl = 0x81        # Noise + gate on
-    delta = -3         # Pitch down faster
-    timer = 15         # Medium effect
+    curr_freq = 0x1500
+    ad = 0x08
+    sr = 0x00
+    ctrl = 0x81
+    delta = 100
+    timer = 10
     active = 1
 
 
@@ -701,7 +686,6 @@ def sfx_play_levelup():
 def sfx_play_slide():
     """Slide sound - quick 'sutty' swoosh upward."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
-    freq: irq_safe[word[SID_CH3_FREQ]]
     ctrl: byte[SID_CH3_CTRL]
     ad: byte[SID_CH3_AD]
     sr: byte[SID_CH3_SR]
@@ -712,7 +696,6 @@ def sfx_play_slide():
     delta: sbyte[ZP_SFX_DELTA]
 
     curr_freq = 0x2000 # Higher start
-    freq = 0x2000
     ad = 0x00          # Instant attack/decay
     sr = 0x50          # Quick fade
     ctrl = 0x81        # Noise + gate (swoosh texture)
@@ -768,20 +751,6 @@ def sfx_tick():
             if timer == 0:
                 ctrl = 0
                 active = 0
-        return
-
-    # Doppler mode (active == 4): up then down
-    if active == 4:
-        # phase stores the turn point (when to reverse)
-        curr_freq += word(delta) * 256
-        freq = curr_freq
-        timer -= 1
-        # At halfway point, reverse direction
-        if timer == phase:
-            delta = -delta
-        if timer == 0:
-            ctrl = 0
-            active = 0
         return
 
     # Normal mode (active == 1): smooth frequency slide
@@ -1824,6 +1793,8 @@ class Game:
         row: byte
         sx: byte
         pos: word
+        # Column clear sound - cheerful rising arpeggio chime. Delayed start.
+        sfx_pending: byte[ZP_SFX_PENDING] = 1
 
         # Calculate screen X position
         sx = col * BLOCK_WIDTH
@@ -1842,8 +1813,6 @@ class Game:
         self.sprite_en_zp = self.sprite_en_zp & 0xFD
         Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
 
-        # Play clear sound
-        sfx_play_clear()
 
     def check_complete_columns():
         ### Check for complete columns and start effect if found ###
@@ -2613,6 +2582,7 @@ class Game:
                 Screen.wait_frames(8)
 
             # Play game over music
+            music_set_volume(5)
             slotshot_gameover_music_vic_init()
             music_enable_all_ch()
             music_disable_loop()
@@ -2648,6 +2618,7 @@ class Game:
         __set_irq__(irq_handler)
         __enable_raster_irq__(IRQ_RASTER_BOTTOM)
 
+
         # Initialize column pool (pre-generate random patterns)
         self.grid.init_pool()
 
@@ -2657,16 +2628,22 @@ class Game:
             Screen.scroll_play_area()
             self.grid.spawn_column()
 
-        self.update_col_num()
+        # Wait for music to stop
+        while not music_is_stopped():
+            pass
+        # Clear key buffer
+        while getkey() != 0:
+            pass
 
-        # Set music volume to 10 (out of 15)
-        music_set_volume(6)
+        # Set music volume
+        music_set_volume(9)
 
         # Run game loop
         self.loop()
 
         # Restore music volume to 15 (full volume)
         music_set_volume(15)
+        music_enable_all_ch()
 
 
 # =============================================================================
@@ -2711,7 +2688,6 @@ class TitleScreen:
         Screen.print_center_at_offset(MENU_ROW_START, "PLAY GAME", COLOR_MENU_NORMAL, 0, -1)
         Screen.print_center_at_offset(MENU_ROW_START + 1, "STORY", COLOR_MENU_NORMAL, 0, -1)
         Screen.print_center_at_offset(MENU_ROW_START + 2, "ABOUT", COLOR_MENU_NORMAL, 0, -1)
-        Screen.print_center_at_offset(MENU_ROW_START + 3, "HIGH SCORES", COLOR_MENU_NORMAL, 0, -1)
 
     def update_menu_highlight():
         ### Update menu item colors based on selection ###
@@ -2960,12 +2936,11 @@ def main():
 
         if menu_choice == 0:
             # Stop music
-            music_stop_fade(20)
+            music_stop_fade(15)
             # PLAY GAME selected
             game()
             # Continue music
             slotshot_music_vic_init()
-            music_enable_all_ch()
 
         elif menu_choice == 1:
             # STORY selected - TODO: show story screen
@@ -2974,8 +2949,4 @@ def main():
         elif menu_choice == 2:
             # ABOUT selected
             about_screen()
-
-        elif menu_choice == 3:
-            # HIGH SCORES selected - TODO: show high scores screen
-            pass
 
