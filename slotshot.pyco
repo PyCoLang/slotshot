@@ -1270,7 +1270,6 @@ class Screen:
         # Bank 3 ($C000-$FFFF)
         self.cia2_pra = self.cia2_pra & 0xFC  # Bank 3 ($C000-$FFFF)
 
-    @relocate(0x200)
     def __init__():
         # Initialize charset
         self.init_charset()
@@ -1308,7 +1307,6 @@ class Screen:
         """Print text centered at the given y position with an offset."""
         self.print_at(20 - len(text) / 2 + offset, y, text, col, bg)
 
-    @relocate(0x200)
     def print_center(y: byte, text: alias[string], col: byte, bg: byte):
         """Print text centered at the given y position."""
         self.print_center_at_offset(y, text, col, bg, 0)
@@ -3004,6 +3002,7 @@ class AboutScreen:
 # screen is closed
 # =============================================================================
 
+@relocate(0xC140)
 def title_screen() -> byte:
     title_screen: TitleScreen
     title_screen()
