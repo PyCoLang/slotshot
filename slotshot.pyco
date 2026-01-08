@@ -123,14 +123,6 @@ CHAR_ROM = 0xD000         # Character ROM (when I/O disabled)
 SCREEN_WIDTH = 40
 SCREEN_HEIGHT = 25
 
-# Row offset lookup table - pre-calculated y * 40 for fast screen access
-# This is a preprocessor constant - gets substituted into tuple declarations
-ROW_OFFSET_DATA = (
-    0, 40, 80, 120, 160, 200, 240, 280, 320, 360,
-    400, 440, 480, 520, 560, 600, 640, 680, 720, 760,
-    800, 840, 880, 920, 960
-)
-
 # Play area: 2x2 character blocks
 TITLE_ROWS = 2            # Rows 0-1: title bar
 STATUS_ROWS = 3           # Rows 22-24: status bar
@@ -272,30 +264,17 @@ COLOR_SPARKLE_2 = LIGHT_GREY  # Sparkle phase 2 (brighter)
 COLOR_GAME_OVER_FLASH = RED
 
 # HIGH SCORE CONFIGURATION
-COLOR_SCORE_BEATING_HIGH = YELLOW    # Color when current score > high score
+COLOR_HIGH_SCORE_LABEL = GREY
+COLOR_HIGH_SCORE = GREY
 SCORE_DISPLAY_TOGGLE_FRAMES = 100
 
-# Dying block animation colors - plays through these colors before disappearing
-# Last color should be BLACK (block gone). len() determines phase count!
-DYING_COLORS = (GREY, LIGHT_GREY, GREY, LIGHT_GREY, GREY, WHITE, BLACK)
-
-# Block colors for random selection (preprocessor constant for tuple)
-# 8 colors = power-of-2 for fast bitmask selection (no modulo bias!)
-# Note: YELLOW excluded (cannon color), using LIGHT_RED instead
-BLOCK_COLORS_DATA = (RED, CYAN, PURPLE, GREEN, ORANGE, LIGHT_GREEN, LIGHT_BLUE, LIGHT_RED)
+# Block colors mask (8 colors = power-of-2 for fast bitmask selection)
 BLOCK_COLORS_MASK = 7         # Bitmask for 8 colors (0-7)
 
-
-# Commodore 64 rainbow colors (from the classic C64 logo)
-# Red -> Orange -> Yellow -> Green -> Blue
-# 40 chars total: 8 + 8 + 8 + 8 + 8 = 40 (full screen width, equal distribution)
-COMMODORE_RAINBOW_DATA = (
-    RED, RED, RED, RED, RED, RED, RED, RED,
-    ORANGE, ORANGE, ORANGE, ORANGE, ORANGE, ORANGE, ORANGE, ORANGE,
-    YELLOW, YELLOW, YELLOW, YELLOW, YELLOW, YELLOW, YELLOW, YELLOW,
-    GREEN, GREEN, GREEN, GREEN, GREEN, GREEN, GREEN, GREEN,
-    BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE
-)
+# Menu colors
+COLOR_MENU_NORMAL = LIGHT_BLUE
+COLOR_MENU_SELECTED = LIGHT_GREY
+COLOR_MENU_BG = BLACK
 
 # =============================================================================
 # TITLE SCREEN CONFIGURATION (Raster Split Bitmap/Text)
@@ -330,91 +309,6 @@ TITLE_VIC_ECM_MODE = 0x40         # $D011 bit 6 (must be OFF for bitmap!)
 MENU_ITEM_COUNT = 3               # Play, Credits, Story
 MENU_ROW_START = 22               # First menu row (screen row)
 
-# Menu colors
-COLOR_MENU_NORMAL = LIGHT_BLUE
-COLOR_MENU_SELECTED = LIGHT_GREY
-COLOR_MENU_BG = BLACK
-
-# =============================================================================
-# LEVEL SYSTEM CONFIGURATION
-# =============================================================================
-# Column speed for each level (lower = faster)
-# len(LEVEL_SPEEDS) determines max level! Index 0 = level 1, etc.
-LEVEL_SPEEDS = (208, 185, 161, 138, 116, 105, 94, 84, 77, 69)
-
-# Cleared columns needed to reach each level (cumulative)
-# Must have len(LEVEL_SPEEDS) - 1 entries (thresholds for level 2 to max)
-# Progressively harder: +15, +20, +25, +30, +35, +40, +45, +50, +55
-CLEARED_THRESHOLDS = (10, 20, 40, 60, 80, 100, 120, 140, 160, 180)
-
-# =============================================================================
-# CUSTOM CHARSET DATA
-# =============================================================================
-# All custom characters in one tuple. Format: screen_code, 8 bytes pixel data
-# 15 characters × 9 bytes = 135 bytes
-CUSTOM_CHARSET = (
-    # --- Title half-characters (split versions of S, L, O, T, H) ---
-    # OVERLAP technique: row 3 in BOTH halves for seamless vertical connection
-    # TOP half: 4 empty + 4 letter rows, BOTTOM half: 4 letter + 4 empty rows
-    # Screen codes 27-31, 34-38 (skipping 32=space, 33=!)
-    27, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x60, 0x38,  # S_TOP
-    28, 0x00, 0x0C, 0x06, 0x66, 0x3C, 0x00, 0x00, 0x00,  # S_BOTTOM
-    29, 0x00, 0x00, 0x00, 0x00, 0x60, 0x60, 0x60, 0x60,  # L_TOP
-    30, 0x00, 0x60, 0x60, 0x60, 0x7E, 0x00, 0x00, 0x00,  # L_BOTTOM
-    31, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x66, 0x66,  # O_TOP
-    34, 0x00, 0x66, 0x66, 0x66, 0x3C, 0x00, 0x00, 0x00,  # O_BOTTOM
-    35, 0x00, 0x00, 0x00, 0x00, 0x7E, 0x18, 0x18, 0x18,  # T_TOP
-    36, 0x00, 0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00,  # T_BOTTOM
-    37, 0x00, 0x00, 0x00, 0x00, 0x66, 0x66, 0x66, 0x7E,  # H_TOP
-    38, 0x00, 0x7E, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00,  # H_BOTTOM
-    # --- Progress bar character ---
-    59, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,  # 2px line near top
-    # --- Block corners (rounded, 1px border) ---
-    60, 0x00, 0x3F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F,  # Top-left
-    61, 0x00, 0xFC, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE,  # Top-right
-    62, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x3F, 0x00,  # Bottom-left
-    63, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFC, 0x00   # Bottom-right
-)
-
-# =============================================================================
-# CANNON SPRITE DATA (Multicolor, color: $0C)
-# =============================================================================
-# Sprite 0: Cannon ready (before firing) - filled barrel
-CANNON_SPRITE_READY = (
-    0xaa, 0xaa, 0x00, 0x99, 0x98, 0x00, 0x90, 0xc0,
-    0x00, 0xa3, 0x00, 0x00, 0xa0, 0xc0, 0x00, 0x90,
-    0x30, 0x00, 0x90, 0xc0, 0x00, 0xa3, 0x00, 0x00,
-    0xa0, 0xc0, 0x00, 0x90, 0x30, 0x00, 0x90, 0xc0,
-    0x00, 0xa3, 0x00, 0x00, 0xa0, 0xc0, 0x00, 0x90,
-    0x30, 0x00, 0x99, 0x98, 0x00, 0xaa, 0xaa, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8c,
-)
-
-# Sprite 1: Cannon fired (after firing) - empty barrel
-CANNON_SPRITE_FIRED = (
-    0xaa, 0xaa, 0x00, 0x99, 0x98, 0x00, 0x90, 0x00,
-    0x00, 0xa0, 0x00, 0x00, 0xa0, 0x00, 0x00, 0x90,
-    0x00, 0x00, 0x90, 0x00, 0x00, 0xa0, 0x00, 0x00,
-    0xa0, 0x00, 0x00, 0x90, 0x00, 0x00, 0x90, 0x00,
-    0x00, 0xa0, 0x00, 0x00, 0xa0, 0x00, 0x00, 0x90,
-    0x00, 0x00, 0x99, 0x98, 0x00, 0xaa, 0xaa, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8c,
-)
-
-# Sprite 2: Bullet - 16x16 rounded block (same shape as game blocks)
-BULLET_SPRITE = (
-    0x00, 0x00, 0x00, 0x3F, 0xFC, 0x00, 0x7F, 0xFE,
-    0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F,
-    0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00,
-    0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE,
-    0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F,
-    0xFE, 0x00, 0x3F, 0xFC, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-)
-
 # =============================================================================
 # SPRITE BLOCK INDICES
 # =============================================================================
@@ -426,52 +320,9 @@ BULLET_BLOCK = 2           # Block 2: bullet ($C080)
 SPARKLE_BLOCK = 3          # Block 3: sparkle ($C0C0)
 STAR_BLOCK = 4             # Block 4: star ($C100) - used for title screen stars
 
-
-# =============================================================================
-# SPARKLE SPRITE DATA (Hires, for shimmer effect)
-# =============================================================================
-# Single checkerboard pattern - color fades instead of pattern changes
-# Based on BULLET_SPRITE rounded shape, combined with checkerboard pattern
-# Hires: 0=transparent, 1=sprite color
-# Each sprite is 64 bytes (21 rows × 3 bytes + 1 padding)
-
-# Sparkle sprite (~50% density) - full checkerboard in rounded shape
-# Bullet shape (0x3F/0x7F, 0xFC/0xFE) AND checkerboard (0x55/0xAA alternating)
-SPARKLE_SPRITE_DENSE = (
-    0x00, 0x00, 0x00,  # Row 0 - empty (rounded corner)
-    0x15, 0x54, 0x00,  # Row 1 - 0x3F & 0x55 = 0x15, 0xFC & 0x54 = 0x54
-    0x2A, 0xA8, 0x00,  # Row 2 - 0x7F & 0xAA = 0x2A, 0xFE & 0xA8 = 0xA8
-    0x55, 0x54, 0x00,  # Row 3 - 0x7F & 0x55 = 0x55, 0xFE & 0x54 = 0x54
-    0x2A, 0xA8, 0x00,  # Row 4
-    0x55, 0x54, 0x00,  # Row 5
-    0x2A, 0xA8, 0x00,  # Row 6
-    0x55, 0x54, 0x00,  # Row 7
-    0x2A, 0xA8, 0x00,  # Row 8
-    0x55, 0x54, 0x00,  # Row 9
-    0x2A, 0xA8, 0x00,  # Row 10
-    0x55, 0x54, 0x00,  # Row 11
-    0x2A, 0xA8, 0x00,  # Row 12
-    0x55, 0x54, 0x00,  # Row 13
-    0x2A, 0xA8, 0x00,  # Row 14 - 0x3F & 0xAA = 0x2A, 0xFC & 0xA8 = 0xA8
-    0x00, 0x00, 0x00,  # Row 15 - empty (rounded corner)
-    0x00, 0x00, 0x00,  # Row 16
-    0x00, 0x00, 0x00,  # Row 17
-    0x00, 0x00, 0x00,  # Row 18
-    0x00, 0x00, 0x00,  # Row 19
-    0x00, 0x00, 0x00,  # Row 20
-    0x00,              # Padding
-)
-
-# Sparkle effect constants (single sprite for efficiency)
+# Sparkle effect constants
 SPARKLE_PHASE_MAX = 3       # Color fade phases (1=dark, 2=light, 3=dark again)
 SPARKLE_SPAWN_CHANCE = 245  # Higher = rarer (200 ≈ 22% per frame when free)
-
-
-# Screen codes for "SLOTSHOT" title using half-characters
-# Row 0 (top row): top halves (empty top + letter top at bottom)
-TITLE_ROW0 = (27, 29, 31, 35, 27, 37, 31, 35)  # S_T, L_T, O_T, T_T, S_T, H_T, O_T, T_T
-# Row 1 (bottom row): bottom halves (letter bottom at top + empty bottom)
-TITLE_ROW1 = (28, 30, 34, 36, 28, 38, 34, 36)  # S_B, L_B, O_B, T_B, S_B, H_B, O_B, T_B
 
 # =============================================================================
 # SHARED ZERO PAGE VARIABLES (IRQ <-> Main loop communication)
@@ -525,37 +376,7 @@ ZP_PAUSED = 0x35           # byte: pause state (0=running, 1=paused)
 IRQ_LOADING_ADDR = 0x400
 IRQ_LOADING_BORDER_HEIGHT = 64
 
-# =============================================================================
-# STAR SPRITES
-# =============================================================================
-# Title screen star sprite positions (5 stars on sprites 3-7)
-# Positions chosen to fill the bottom area around the menu, bridging bitmap/text split
-# X coordinates: sprite X = screen X + 24
-# Y coordinates: sprite Y = screen Y + 50
-# Menu is centered around X=160, so stars go on left (<130) and right (>190) sides
-TITLE_STAR_POSITIONS = (
-    # (X, Y) pairs - scattered across BLACK areas of title screen
-    # Sprite coords: X = screen_x + 24, Y = screen_y + 50
-    # Visible area: X = 24-343, Y = 50-249
-    57, 243,    # Star 0: bottom left, menu area
-    99, 219,    # Star 1: top left area
-    259, 219,   # Star 2: bottom right, menu area (X > 255!)
-    271, 249,   # Star 3: right side, middle (X > 255!)
-    311, 231,   # Star 4: top right area (X > 255!)
-)
-# Game field star sprite positions (5 stars on sprites 3-7)
-# Play area: X = 56-343, Y = 66-218 (sprite coords)
-GAME_STAR_POSITIONS = (
-    # (X, Y) pairs - sprite coords, scattered across play field
-    57, 95,        # Star 0: upper left
-    98, 189,      # Star 1: lower left
-    175, 142,      # Star 2: upper center
-    261, 201,      # Star 3: lower center
-    283, 102,      # Star 4: upper right (X > 255!)
-)
-# Pre-calculated Color RAM positions for star visibility check
-# pos = char_y * 40 + char_x, where char = (sprite - 24) / 8 for X, (sprite - 50) / 8 for Y
-GMAE_STAR_COLOR_POSITIONS = (204, 689, 459, 749, 272)
+# Star sprite color
 STAR_COLOR = LIGHT_GREY
 
 # =============================================================================
@@ -579,6 +400,112 @@ SCORE_LEVEL_BONUS = 5       # Additional points per level (added to base)
 # =============================================================================
 COLUMN_START_MUSIC = 15
 COLUMN_HISTERESIS = 3
+
+# =============================================================================
+# GLOBAL TUPLES (data stored directly - no preprocessor constants needed!)
+# =============================================================================
+
+# Row offset lookup (25 rows)
+row_offset_data: tuple[word] = (
+    0, 40, 80, 120, 160, 200, 240, 280, 320, 360,
+    400, 440, 480, 520, 560, 600, 640, 680, 720, 760,
+    800, 840, 880, 920, 960
+)
+
+# Colors
+dying_colors_data: tuple[byte] = (GREY, LIGHT_GREY, GREY, LIGHT_GREY, GREY, WHITE, BLACK)
+block_colors_data: tuple[byte] = (RED, CYAN, PURPLE, GREEN, ORANGE, LIGHT_GREEN, LIGHT_BLUE, LIGHT_RED)
+commodore_rainbow_data: tuple[byte] = (
+    RED, RED, RED, RED, RED, RED, RED, RED,
+    ORANGE, ORANGE, ORANGE, ORANGE, ORANGE, ORANGE, ORANGE, ORANGE,
+    YELLOW, YELLOW, YELLOW, YELLOW, YELLOW, YELLOW, YELLOW, YELLOW,
+    GREEN, GREEN, GREEN, GREEN, GREEN, GREEN, GREEN, GREEN,
+    BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE
+)
+
+# Level system
+level_speeds_data: tuple[byte] = (208, 185, 161, 138, 116, 105, 94, 84, 77, 69)
+cleared_thresholds_data: tuple[word] = (10, 20, 40, 60, 80, 100, 120, 140, 160, 180)
+
+# =============================================================================
+# RELOCATED DATA - Copied to target addresses at startup
+# =============================================================================
+# Custom charset characters - overlay ROM charset at $C800
+# Each character is 8 bytes at address: $C800 + char_code * 8
+# Title "SLOTSHOT" characters (top/bottom halves)
+char_27: relocate[tuple[byte], 0xC8D8] = (0x00, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x60, 0x38)  # S top
+char_28: relocate[tuple[byte], 0xC8E0] = (0x00, 0x0C, 0x06, 0x66, 0x3C, 0x00, 0x00, 0x00)  # S bottom
+char_29: relocate[tuple[byte], 0xC8E8] = (0x00, 0x00, 0x00, 0x00, 0x60, 0x60, 0x60, 0x60)  # L top
+char_30: relocate[tuple[byte], 0xC8F0] = (0x00, 0x60, 0x60, 0x60, 0x7E, 0x00, 0x00, 0x00)  # L bottom
+char_31: relocate[tuple[byte], 0xC8F8] = (0x00, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x66, 0x66)  # O top
+char_34: relocate[tuple[byte], 0xC910] = (0x00, 0x66, 0x66, 0x66, 0x3C, 0x00, 0x00, 0x00)  # O bottom
+char_35: relocate[tuple[byte], 0xC918] = (0x00, 0x00, 0x00, 0x00, 0x7E, 0x18, 0x18, 0x18)  # T top
+char_36: relocate[tuple[byte], 0xC920] = (0x00, 0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00)  # T bottom
+char_37: relocate[tuple[byte], 0xC928] = (0x00, 0x00, 0x00, 0x00, 0x66, 0x66, 0x66, 0x7E)  # H top
+char_38: relocate[tuple[byte], 0xC930] = (0x00, 0x7E, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00)  # H bottom
+# Game block characters
+char_59: relocate[tuple[byte], 0xC9D8] = (0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00)  # Progress bar
+char_60: relocate[tuple[byte], 0xC9E0] = (0x00, 0x3F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F)  # Block TL
+char_61: relocate[tuple[byte], 0xC9E8] = (0x00, 0xFC, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE)  # Block TR
+char_62: relocate[tuple[byte], 0xC9F0] = (0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x3F, 0x00)  # Block BL
+char_63: relocate[tuple[byte], 0xC9F8] = (0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFC, 0x00)  # Block BR
+
+# Sprite data - 64 bytes each, at $C000 in VIC Bank 3
+# Same target address = consecutive placement (cannon_ready, cannon_fired, bullet, sparkle)
+cannon_sprite_ready: relocate[tuple[byte], 0xC000] = (
+    0xaa, 0xaa, 0x00, 0x99, 0x98, 0x00, 0x90, 0xc0,
+    0x00, 0xa3, 0x00, 0x00, 0xa0, 0xc0, 0x00, 0x90,
+    0x30, 0x00, 0x90, 0xc0, 0x00, 0xa3, 0x00, 0x00,
+    0xa0, 0xc0, 0x00, 0x90, 0x30, 0x00, 0x90, 0xc0,
+    0x00, 0xa3, 0x00, 0x00, 0xa0, 0xc0, 0x00, 0x90,
+    0x30, 0x00, 0x99, 0x98, 0x00, 0xaa, 0xaa, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8c
+)
+cannon_sprite_fired: relocate[tuple[byte], 0xC000] = (
+    0xaa, 0xaa, 0x00, 0x99, 0x98, 0x00, 0x90, 0x00,
+    0x00, 0xa0, 0x00, 0x00, 0xa0, 0x00, 0x00, 0x90,
+    0x00, 0x00, 0x90, 0x00, 0x00, 0xa0, 0x00, 0x00,
+    0xa0, 0x00, 0x00, 0x90, 0x00, 0x00, 0x90, 0x00,
+    0x00, 0xa0, 0x00, 0x00, 0xa0, 0x00, 0x00, 0x90,
+    0x00, 0x00, 0x99, 0x98, 0x00, 0xaa, 0xaa, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8c
+)
+bullet_sprite: relocate[tuple[byte], 0xC000] = (
+    0x00, 0x00, 0x00, 0x3F, 0xFC, 0x00, 0x7F, 0xFE,
+    0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F,
+    0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00,
+    0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE,
+    0x00, 0x7F, 0xFE, 0x00, 0x7F, 0xFE, 0x00, 0x7F,
+    0xFE, 0x00, 0x3F, 0xFC, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+)
+sparkle_sprite: relocate[tuple[byte], 0xC000] = (
+    0x00, 0x00, 0x00, 0x15, 0x54, 0x00, 0x2A, 0xA8, 0x00,
+    0x55, 0x54, 0x00, 0x2A, 0xA8, 0x00, 0x55, 0x54, 0x00,
+    0x2A, 0xA8, 0x00, 0x55, 0x54, 0x00, 0x2A, 0xA8, 0x00,
+    0x55, 0x54, 0x00, 0x2A, 0xA8, 0x00, 0x55, 0x54, 0x00,
+    0x2A, 0xA8, 0x00, 0x55, 0x54, 0x00, 0x2A, 0xA8, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00
+)
+
+# Title screen character codes (bottom and top halves)
+title_row0_data: tuple[byte] = (27, 29, 31, 35, 27, 37, 31, 35)
+title_row1_data: tuple[byte] = (28, 30, 34, 36, 28, 38, 34, 36)
+
+# Star positions (x, y pairs for sprites)
+title_star_positions_data: tuple[word] = (57, 243, 99, 219, 259, 219, 271, 249, 311, 231)
+game_star_positions_data: tuple[word] = (57, 95, 98, 189, 175, 142, 261, 201, 283, 102)
+game_star_color_positions_data: tuple[word] = (204, 689, 459, 749, 272)
+
+bitmap_rle: tuple[byte] = SLOTSHOT_BITMAP_RLE
+screen_rle: tuple[byte] = SLOTSHOT_SCREEN_RLE
+colorram_rle: tuple[byte] = SLOTSHOT_COLORRAM_RLE
+
 
 # =============================================================================
 # SOUND EFFECTS
@@ -882,8 +809,6 @@ def irq_handler(vic: byte, cia1: byte):
 
     # Color RAM for inline collision detection
     color_ram: array[byte, 1000][COLOR]
-    row_offset: tuple[word] = ROW_OFFSET_DATA
-    star_positions: tuple[word] = GMAE_STAR_COLOR_POSITIONS
 
     # Collision detection temps
     next_x: word
@@ -944,7 +869,7 @@ def irq_handler(vic: byte, cia1: byte):
 
                 # IMMEDIATELY place player block at rightmost column
                 screen_y = PLAY_TOP + bullet_row * BLOCK_HEIGHT
-                pos = row_offset[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
+                pos = row_offset_data[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
                 color_ram[pos] = WHITE
                 color_ram[pos + 1] = WHITE
                 color_ram[pos + 40] = WHITE
@@ -957,7 +882,7 @@ def irq_handler(vic: byte, cia1: byte):
                 if grid_col < GRID_WIDTH:
                     # Calculate Color RAM position (top-left of 2x2 block)
                     screen_y = PLAY_TOP + bullet_row * BLOCK_HEIGHT
-                    pos = row_offset[screen_y] + word(grid_col) * BLOCK_WIDTH
+                    pos = row_offset_data[screen_y] + word(grid_col) * BLOCK_WIDTH
 
                     # Check ALL 4 corners of the block!
                     # During scroll, some corners may be BLACK (already copied) while others aren't
@@ -977,7 +902,7 @@ def irq_handler(vic: byte, cia1: byte):
                         # IMMEDIATELY place player block at hit_col - 1 (if valid)
                         # This ensures block is placed even during scroll
                         if grid_col > 0:
-                            pos = row_offset[screen_y] + word(grid_col - 1) * BLOCK_WIDTH
+                            pos = row_offset_data[screen_y] + word(grid_col - 1) * BLOCK_WIDTH
                             # Draw white block (2x2)
                             color_ram[pos] = WHITE
                             color_ram[pos + 1] = WHITE
@@ -1038,7 +963,7 @@ def irq_handler(vic: byte, cia1: byte):
         # --- Update star visibility based on Color RAM ---
         star_mask = 0xF8  # Start with all stars enabled
         for i in range(5):
-            pos = star_positions[i]
+            pos = game_star_color_positions_data[i]
             if (color_ram[pos] & 0x0F) != BLACK:
                 star_mask = star_mask & (0xFF ^ byte(1 << (3 + i)))
         sprite_enable = sprite_en | star_mask
@@ -1159,8 +1084,6 @@ class Screen:
     sprite_color: array[byte, 8][SPRITE_COLOR_0]
     sprite_ptr: array[byte, 8][SPRITE_POINTER_BASE]
 
-    row_offset: tuple[word] = ROW_OFFSET_DATA
-
     def init_play_area():
         """
         Fill play area with block characters - colors determine visibility.
@@ -1174,7 +1097,7 @@ class Screen:
         # Iterate over block rows (10 blocks = 20 screen rows)
         for y in range(GRID_HEIGHT):
             screen_y = PLAY_TOP + y * BLOCK_HEIGHT
-            pos = self.row_offset[screen_y]
+            pos = row_offset_data[screen_y]
 
             for x in range(GRID_WIDTH):
                 # Colors already BLACK from array init = invisible blocks
@@ -1190,40 +1113,6 @@ class Screen:
                 self.screen[pos + 41] = CHAR_BLOCK_BR
                 # Colors already BLACK from array init = invisible blocks
                 pos += BLOCK_WIDTH
-
-    def init_charset():
-        """Initialize charset by copying ROM to RAM, create custom chars, enable ECM."""
-        cpu_port: byte[CPU_PORT]
-        vic_memptr: byte[VIC_MEMPTR]
-        char_rom: array[byte, 2048][CHAR_ROM]
-        char_ram: array[byte, 2048][CHARSET_RAM]
-        custom_chars: tuple[byte] = CUSTOM_CHARSET
-        old_port: byte
-        code: byte
-        i: byte
-        j: byte
-        dst: word
-
-        # Disable I/O to access CHAROM at $D000
-        __sei__()
-        old_port = cpu_port
-        cpu_port = old_port & 0xFB
-
-        # Copy 2KB ROM charset to RAM at $C800 (128 bytes × 16 rows)
-        # This charset is shared by game AND title menu (Bank 3 has no ROM hole)
-        blkcpy(char_rom, 0, char_ram, 0, 128, 16, 128)
-
-        # Restore I/O
-        cpu_port = old_port
-        __cli__()
-
-        # Copy all custom characters from unified tuple
-        # Format: screen_code (1 byte) + pixel data (8 bytes) per character
-        for i in range(len(custom_chars) / 9):
-            code = custom_chars[i * 9]          # First byte = screen code
-            dst = word(code) * 8                # Destination offset in char RAM
-            for j in range(8):
-                char_ram[dst + j] = custom_chars[i * 9 + 1 + j]
 
     def sync_raster(raster: byte):
         vic_ctrl: byte[VIC_CTRL1]
@@ -1270,17 +1159,13 @@ class Screen:
         # Bank 3 ($C000-$FFFF)
         self.cia2_pra = self.cia2_pra & 0xFC  # Bank 3 ($C000-$FFFF)
 
-    def __init__():
-        # Initialize charset
-        self.init_charset()
-
     def scroll_play_area():
         """Scroll Color RAM 2 chars left - caller handles raster sync and SEI/CLI!"""
         offset: word
         # Just the blkcpy - caller is responsible for:
         # 1. Raster sync
         # 2. SEI before, CLI after bullet_x adjustment
-        offset = self.row_offset[PLAY_TOP]
+        offset = row_offset_data[PLAY_TOP]
         blkcpy(self.colors, offset + 2, self.colors, offset, 38, 20, 40)
 
     def print_at(x: byte, y: byte, text: alias[string], col: byte, bg: byte):
@@ -1289,7 +1174,7 @@ class Screen:
         i: byte
         code: byte
 
-        pos = self.row_offset[y] + x
+        pos = row_offset_data[y] + x
         for i in range(len(text)):
             code = text[i]
             if code >= 65 and code <= 90:
@@ -1319,7 +1204,7 @@ class Screen:
         temp: word
         i: byte
 
-        pos = self.row_offset[y] + x
+        pos = row_offset_data[y] + x
         temp = num
         digit_count = 0
 
@@ -1349,13 +1234,12 @@ class Screen:
         filled = number of characters to show (0-40), depletes from right to left.
         Depleted segments show dark grey line instead of disappearing.
         """
-        rainbow: tuple[byte] = COMMODORE_RAINBOW_DATA
         pos: word
         i: byte
         ecm_char: byte
 
         # Calculate starting position (row 22, column 0)
-        pos = self.row_offset[PROGRESS_BAR_ROW] + PROGRESS_BAR_START
+        pos = row_offset_data[PROGRESS_BAR_ROW] + PROGRESS_BAR_START
 
         # ECM character code - always use progress bar character
         ecm_char = CHAR_PROGRESS + BG_STATUS
@@ -1365,7 +1249,7 @@ class Screen:
             self.screen[pos] = ecm_char
             if i < filled:
                 # Active segment - rainbow color
-                self.colors[pos] = rainbow[i]
+                self.colors[pos] = commodore_rainbow_data[i]
             else:
                 # Depleted segment - grey line remains visible on dark grey bg
                 self.colors[pos] = GREY
@@ -1379,26 +1263,12 @@ class Screen:
 @singleton
 class Sprites:
     """Sprite data storage and initialization."""
-    # Mapped arrays in VIC bank 3 ($C000-$CFFF)
-    cannon_ready: array[byte, 64][SPRITE_DATA_ADDR]
-    cannon_fired: array[byte, 64][SPRITE_DATA_ADDR + 64]
-    bullet_data: array[byte, 64][SPRITE_DATA_ADDR + 128]
-    sparkle_data: array[byte, 64][SPRITE_DATA_ADDR + 192]
+    # Star sprite needs runtime generation (simple dot pattern)
+    # Other sprites (cannon, bullet, sparkle) handled by relocate tuples at $C000
     star_data: array[byte, 64][SPRITE_DATA_ADDR + 256]
 
     def __init__():
-        """Initialize all sprite data - call once at startup."""
-        # Copy sprite patterns to VIC bank
-        cannon_src: tuple[byte] = CANNON_SPRITE_READY
-        cannon_fired_src: tuple[byte] = CANNON_SPRITE_FIRED
-        bullet_src: tuple[byte] = BULLET_SPRITE
-        sparkle_src: tuple[byte] = SPARKLE_SPRITE_DENSE
-
-        self.cannon_ready = cannon_src
-        self.cannon_fired = cannon_fired_src
-        self.bullet_data = bullet_src
-        self.sparkle_data = sparkle_src
-
+        """Initialize star sprite - other sprites already at target via relocate."""
         # Generate star sprite: 2x1 pixel dot in top-left
         memfill(self.star_data, 0)
         self.star_data[0] = 0xC0  # %11000000 = leftmost 2 pixels
@@ -1512,11 +1382,8 @@ class Grid:
     dying_positions: array[word, 40]
     dying_count: byte = 0
 
-    row_offset: tuple[word] = ROW_OFFSET_DATA
-
     def init_pool():
         """Pre-generate column patterns at startup."""
-        block_colors: tuple[byte] = BLOCK_COLORS_DATA
         col: byte
         row: byte
         holes: byte
@@ -1531,7 +1398,7 @@ class Grid:
 
             # Fill column with random colors (FAST bitmask - no modulo!)
             for row in range(GRID_HEIGHT):
-                color = block_colors[Random.range_mask(BLOCK_COLORS_MASK)]
+                color = block_colors_data[Random.range_mask(BLOCK_COLORS_MASK)]
                 self.column_pool[ro] = color
                 ro += 1
 
@@ -1552,7 +1419,7 @@ class Grid:
         sy: byte
         sx = col * BLOCK_WIDTH
         sy = PLAY_TOP + row * BLOCK_HEIGHT
-        return Screen.colors[self.row_offset[sy] + sx] & 0x0F
+        return Screen.colors[row_offset_data[sy] + sx] & 0x0F
 
     def grid_to_screen_x(col: byte) -> byte:
         """Convert grid column to screen X position."""
@@ -1574,7 +1441,7 @@ class Grid:
         pool_offset = word(Random.range_mask(COLUMN_POOL_MASK)) * 10
 
         # Calculate Color RAM offset for rightmost column (chars 38-39)
-        offset = self.row_offset[PLAY_TOP] + 38
+        offset = row_offset_data[PLAY_TOP] + 38
 
         # 4 blkcpy calls to fill 2x2 blocks:
         # src_stride=1 (pool bytes are consecutive)
@@ -1607,7 +1474,7 @@ class Grid:
 
         # Iterate over all grid cells (only top-left corner of each 2x2 block)
         for row in range(GRID_HEIGHT):
-            base_pos = self.row_offset[PLAY_TOP + row * BLOCK_HEIGHT]
+            base_pos = row_offset_data[PLAY_TOP + row * BLOCK_HEIGHT]
             for col in range(GRID_WIDTH):
                 pos = base_pos + word(col) * BLOCK_WIDTH
                 color = Screen.colors[pos] & 0x0F
@@ -1666,7 +1533,7 @@ class Grid:
         c = col
         while c > 0:
             c -= 1
-            src_offset = self.row_offset[PLAY_TOP] + word(c) * BLOCK_WIDTH
+            src_offset = row_offset_data[PLAY_TOP] + word(c) * BLOCK_WIDTH
             dst_offset = src_offset + BLOCK_WIDTH
             # Copy both screen RAM and color RAM
             blkcpy(Screen.screen, src_offset, Screen.screen, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
@@ -1738,13 +1605,9 @@ class Game:
     sprite_en_zp: byte[ZP_SPRITE_ENABLE]
     star_mask_zp: byte[ZP_STAR_MASK]
 
-    row_offset: tuple[word] = ROW_OFFSET_DATA
-
     def draw_title():
         """Draw title bar (rows 0-1) with ECM background and half-characters."""
         screen_title: array[byte, 80][SCREEN] = [CHAR_SPACE + BG_TITLE]
-        title_row0: tuple[byte] = TITLE_ROW0  # Bottom halves
-        title_row1: tuple[byte] = TITLE_ROW1  # Top halves
         x: byte
         color: byte
 
@@ -1752,8 +1615,8 @@ class Game:
         # Row 0: bottom halves (these appear at top of title bar)
         # Row 1: top halves (these appear at bottom of title bar)
         for x in range(8):
-            Screen.screen[16+ x] = title_row0[x] + BG_TITLE
-            Screen.screen[16 + 40 + x] = title_row1[x] + BG_TITLE
+            Screen.screen[16+ x] = title_row0_data[x] + BG_TITLE
+            Screen.screen[16 + 40 + x] = title_row1_data[x] + BG_TITLE
             # Apply gradient: every 2 characters change color
             if x < 4:
                 color = WHITE
@@ -1765,6 +1628,7 @@ class Game:
     def update_status():
         """Update status bar"""
         score_color: byte
+        label_color: byte
         display_value: word
 
         Screen.print_number(8, 23, self.cols_cleared, 5, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
@@ -1773,23 +1637,27 @@ class Game:
 
         # Show "H-" prefix and high score, or current score
         if self.showing_high_score and HighScore.value > 0:
-            Screen.print_at(0, 24, "H-", COLOR_STATUS_TEXT, BG_STATUS)
+            Screen.print_at(0, 24, "H-", COLOR_HIGH_SCORE_LABEL, BG_STATUS)
             display_value = HighScore.value
-            score_color = COLOR_STATUS_TEXT
+            label_color = COLOR_HIGH_SCORE_LABEL
+            score_color = COLOR_HIGH_SCORE
         else:
-            Screen.print_at(0, 24, "  ", COLOR_STATUS_TEXT, BG_STATUS)
+            label_color = COLOR_STATUS_TEXT
+            score_color = COLOR_STATUS_TEXT_HIGHLIGHT
             display_value = self.score
             # Highlight if beating high score
             if HighScore.is_beaten(self.score):
-                score_color = COLOR_SCORE_BEATING_HIGH
                 # Play sound once when first beating high score
                 if not self.high_score_beaten:
                     self.high_score_beaten = True
                     sfx_play_bibip()
+                Screen.print_at(0, 24, "B-", COLOR_STATUS_TEXT, BG_STATUS)
             else:
-                score_color = COLOR_STATUS_TEXT_HIGHLIGHT
+                Screen.print_at(0, 24, "  ", COLOR_STATUS_TEXT, BG_STATUS)
+
+        Screen.print_at(2, 24, "SCORE:", label_color, BG_STATUS)
         Screen.print_number(8, 24, display_value, 5, score_color, BG_STATUS)
-        # Skip level update if flash animation is active (update_level_flash handles it)
+
 
     def update_score_display():
         """Handle alternating score/high score display (call every frame)."""
@@ -1887,7 +1755,7 @@ class Game:
 
         # Save original colors
         for row in range(GRID_HEIGHT):
-            pos = self.row_offset[PLAY_TOP + row * BLOCK_HEIGHT] + sx
+            pos = row_offset_data[PLAY_TOP + row * BLOCK_HEIGHT] + sx
             self.effect_saved_colors[row] = Screen.colors[pos] & 0x0F
 
         # Start effect state machine
@@ -2049,13 +1917,13 @@ class Game:
         # Next step will swap back - after 2 swaps it returns to normal
         for cx in range(self.cascade_src_col * BLOCK_WIDTH, (self.cascade_dst_col + 1) * BLOCK_WIDTH):
             # Top row - swap TL↔TR
-            src_pos = self.row_offset[sy] + cx
+            src_pos = row_offset_data[sy] + cx
             if Screen.screen[src_pos] == CHAR_BLOCK_TL:
                 Screen.screen[src_pos] = CHAR_BLOCK_TR
             else:
                 Screen.screen[src_pos] = CHAR_BLOCK_TL
             # Bottom row - swap BL↔BR
-            src_pos = self.row_offset[sy + 1] + cx
+            src_pos = row_offset_data[sy + 1] + cx
             if Screen.screen[src_pos] == CHAR_BLOCK_BL:
                 Screen.screen[src_pos] = CHAR_BLOCK_BR
             else:
@@ -2065,13 +1933,13 @@ class Game:
         cx = end_char - 1
         while cx >= start_char:
             # Top row - move color only
-            src_pos = self.row_offset[sy] + cx
+            src_pos = row_offset_data[sy] + cx
             color = Screen.colors[src_pos] & 0x0F
             if color != BLACK:
                 Screen.colors[src_pos + 1] = color
                 Screen.colors[src_pos] = BLACK
             # Bottom row - move color only
-            src_pos = self.row_offset[sy + 1] + cx
+            src_pos = row_offset_data[sy + 1] + cx
             color = Screen.colors[src_pos] & 0x0F
             if color != BLACK:
                 Screen.colors[src_pos + 1] = color
@@ -2146,8 +2014,6 @@ class Game:
         Update effect state machine - call every frame.
         Returns when effect completes (removes column, updates score).
         """
-        cleared_thresholds: tuple[word] = CLEARED_THRESHOLDS
-        level_speeds: tuple[word] = LEVEL_SPEEDS
         row: byte
         sx: byte
         base_pos: word
@@ -2165,7 +2031,7 @@ class Game:
             color = BLACK
 
         for row in range(GRID_HEIGHT):
-            base_pos = self.row_offset[PLAY_TOP + row * BLOCK_HEIGHT] + sx
+            base_pos = row_offset_data[PLAY_TOP + row * BLOCK_HEIGHT] + sx
             if self.effect_phase & 1:
                 # Odd phases: BLACK (invisible)
                 Screen.colors[base_pos] = BLACK
@@ -2205,11 +2071,11 @@ class Game:
                 self.score_display_timer = 0
 
                 # Level up check (BEFORE update_status so level displays immediately!)
-                # Max level determined by len(level_speeds)
-                while self.level < len(level_speeds):
-                    if self.cols_cleared >= cleared_thresholds[self.level - 1]:
+                # Max level determined by len(level_speeds_data)
+                while self.level < len(level_speeds_data):
+                    if self.cols_cleared >= cleared_thresholds_data[self.level - 1]:
                         self.level += 1
-                        self.column_speed = level_speeds[self.level - 1]
+                        self.column_speed = level_speeds_data[self.level - 1]
                         self.level_flash = 80  # Start 5x flash animation (80 frames / 8 = 10 phases)
                         sfx_play_bibip()
                     else:
@@ -2226,7 +2092,6 @@ class Game:
         Animate dying blocks through DYING_COLORS phases.
         Called every frame, runs independently of other animations.
         """
-        dying_colors: tuple[byte] = DYING_COLORS
         i: byte
         pos: word
         color: byte
@@ -2240,7 +2105,7 @@ class Game:
             return
 
         # Get color for current phase (phase 1 = index 0, etc.)
-        color = dying_colors[self.dying_phase - 1]
+        color = dying_colors_data[self.dying_phase - 1]
 
         # Apply color to all dying blocks
         for i in range(self.grid.dying_count):
@@ -2257,7 +2122,7 @@ class Game:
             self.dying_phase += 1
 
             # Animation complete? (tuple length determines phase count)
-            if self.dying_phase > len(dying_colors):
+            if self.dying_phase > len(dying_colors_data):
                 self.dying_phase = 0
                 self.grid.dying_count = 0  # Clear the dying list
 
@@ -2275,7 +2140,7 @@ class Game:
         sparkle_phase: byte[ZP_SPARKLE_PHASE]
 
         # Initialize star sprites (3-7) for game field background
-        Sprites.init_stars(GAME_STAR_POSITIONS, LIGHT_GREY)
+        Sprites.init_stars(game_star_positions_data, LIGHT_GREY)
 
         # Setup multicolor mode for cannon sprite
         Screen.sprite_mc1 = DARK_GREY   # Multicolor 1 ($D025)
@@ -2572,7 +2437,7 @@ class Game:
         # Calculate screen position and check color
         screen_y = PLAY_TOP + grid_y * BLOCK_HEIGHT
         screen_x = grid_x * BLOCK_WIDTH
-        pos = self.row_offset[screen_y] + screen_x
+        pos = row_offset_data[screen_y] + screen_x
 
         # Check if there's a colored block here (not black)
         color = Screen.colors[pos] & 0x0F
@@ -2650,7 +2515,7 @@ class Game:
         pak_color: byte = LIGHT_BLUE
 
         for y in range(8, 16):
-            pos = self.row_offset[y]
+            pos = row_offset_data[y]
             for x in range(10, 30):
                 Screen.screen[pos + x] = CHAR_SPACE + BG_STATUS
                 Screen.colors[pos + x] = WHITE  # This hides stars in front of window
@@ -2659,7 +2524,7 @@ class Game:
 
         # Show "NEW HIGHSCORE!" if player beat the high score
         if HighScore.is_beaten(self.score):
-            Screen.print_at(13, 11, "NEW HIGHSCORE!", YELLOW, BG_STATUS)
+            Screen.print_at(13, 12, "NEW HIGHSCORE!", YELLOW, BG_STATUS)
 
         while getkey() != 0:
             pass
@@ -2712,13 +2577,12 @@ class Game:
         frame_counter: byte[ZP_FRAME_COUNTER] = 0
         game_seconds: word[ZP_GAME_SECONDS] = 0
         jiffy_lo: byte[JIFFY_LO_ADDR]
-        level_speeds: tuple[word] = LEVEL_SPEEDS
 
         # Set up VIC for ECM text mode (game mode)
         Screen.set_game_mode()
         Screen.border = COLOR_SCREEN_BORDER
 
-        self.column_speed = level_speeds[0]  # Level 1 speed from tuple
+        self.column_speed = level_speeds_data[0]  # Level 1 speed from tuple
         self.last_jiffy = jiffy_lo  # Initialize delta timing baseline
 
         # Draw title screen
@@ -2783,15 +2647,8 @@ class TitleScreen:
     # Menu state
     menu_selected: byte = 0
 
-    # Row offset lookup for fast screen access
-    row_offset: tuple[word] = ROW_OFFSET_DATA
-
     def decompress_image():
         """Decompress RLE image data to VIC memory."""
-        bitmap_rle: tuple[byte] = SLOTSHOT_BITMAP_RLE
-        screen_rle: tuple[byte] = SLOTSHOT_SCREEN_RLE
-        colorram_rle: tuple[byte] = SLOTSHOT_COLORRAM_RLE
-
         # Decompress to destinations
         rle_decompress(colorram_rle, self.colorram)
         rle_decompress(screen_rle, self.screen_data)
@@ -2811,7 +2668,7 @@ class TitleScreen:
         pos: word
         color: byte
         for i in range(MENU_ROW_START, MENU_ROW_START + MENU_ITEM_COUNT):
-            pos = self.row_offset[i]
+            pos = row_offset_data[i]
             if i == self.menu_selected + MENU_ROW_START:
                 color = COLOR_MENU_SELECTED
             else:
@@ -2873,7 +2730,7 @@ class TitleScreen:
         # Decompress and display image
         self.decompress_image()
         # Initialize star sprites for background effect
-        Sprites.init_stars(TITLE_STAR_POSITIONS, STAR_COLOR)
+        Sprites.init_stars(title_star_positions_data, STAR_COLOR)
 
 
 class StoryScreen:
@@ -3030,14 +2887,11 @@ def game():
 # MAIN
 # =============================================================================
 
+@charset_rom(0xC800)
 @noreturn
 def main():
     # Menu selection: 0=Play, 2=Story, 3=Credits
     menu_choice: byte = 0
-
-    # Initialize screen hardware ONCE at startup
-    # This copies ROM charset to $C800 (needed for title menu too)
-    Screen()
 
     # Initialize sprite data in VIC bank
     Sprites()
