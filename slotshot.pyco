@@ -19,16 +19,23 @@ include("musicplayer")
 # =============================================================================
 # MEMORY LAYOUT - VIC BANK 3 ($C000-$FFFF)
 # =============================================================================
-# Using Bank 3 because program is ~30KB (ends ~$7EB2) and stack grows UPWARD.
-# Bank 3 gives stack 16KB headroom ($7EB2-$BFFF) before hitting VIC memory.
+# Program size: ~43KB (PRG: 43594 bytes), ends at ~$B239
+# Stack grows UPWARD from program end, has ~3KB headroom before VIC Bank 3.
 #
-# Bank 3 Layout:
-#   $C000-$C0FF: Sprite data (256 bytes, 4 sprites)
-#   $C100-$C3A8: Column buffer + pool (680 bytes)
+# Full Memory Map:
+#   $0400-$0427: Column blit buffer (40 bytes)
+#   $0428-$06A7: Column pool (640 bytes, pre-generated patterns)
+#   $06A8-$07FF: FREE (344 bytes)
+#   $0801-$B238: Program (code + data + BSS, ~43KB)
+#   $B239-$BFFF: Stack headroom (~3KB)
+#
+# VIC Bank 3 Layout ($C000-$FFFF):
+#   $C000-$C13F: Sprite data (320 bytes, 5 sprites)
+#   $C140-$C3FF: FREE (704 bytes)
 #   $C400-$C7FF: Screen RAM (1KB)
 #   $C800-$CFFF: Charset (2KB) - shared by game AND title menu
-#   $D000-$DFFF: I/O (not usable for graphics!)
-#   $E000-$FFFF: Title bitmap ONLY (8KB)
+#   $D000-$DFFF: I/O (VIC/SID/CIA - not usable!)
+#   $E000-$FFFF: Title bitmap (8KB)
 SCREEN = 0xC400           # Screen RAM in bank 3
 CHARSET_RAM = 0xC800      # Custom charset location in bank 3 (shared with title)
 SPRITE_DATA_ADDR = 0xC000 # Sprite data at start of bank 3
@@ -41,8 +48,8 @@ COLOR = 0xD800
 # CIA1 registers
 CIA1_ICR = 0xDC0D
 
-# Work buffer memory - use $0400 area (original screen RAM, safe from stack!)
-# VIC Bank 3 uses $CC00 for screen, so $0400-$07FF is free
+# Work buffer memory - use $0400 area (default screen RAM, safe from stack!)
+# VIC Bank 3 uses $C400 for screen, so $0400-$07FF is free for buffers
 COLUMN_BUFFER_ADDR = 0x0400   # 40 bytes for column blit buffer ($0400-$0427)
 COLUMN_POOL_ADDR = 0x0428     # 640 bytes for pre-generated column patterns ($0428-$06A7)
 
@@ -327,13 +334,6 @@ MENU_ROW_START = 22               # First menu row (screen row)
 COLOR_MENU_NORMAL = LIGHT_BLUE
 COLOR_MENU_SELECTED = LIGHT_GREY
 COLOR_MENU_BG = BLACK
-
-# Disk loading - single temp buffer for sequential load/decompress
-# $C000-$CFFF is free RAM (4KB), plenty for largest RLE file (~3KB)
-# Size is read from RLE header after loading (first 2 bytes at DISK_TEMP_ADDR)
-# Using $8000 as temp buffer - safe during title load when stack is small
-# After loading, this area can be used by stack if game needs deep recursion
-DISK_TEMP_ADDR = 0x8000       # Temp buffer for all RLE loads (4KB available)
 
 # =============================================================================
 # LEVEL SYSTEM CONFIGURATION
