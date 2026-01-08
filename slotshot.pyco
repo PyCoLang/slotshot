@@ -597,6 +597,7 @@ class _SFXInit:
     sfx_pending: byte[ZP_SFX_PENDING] = 0
 
 
+@relocate(0xC140)
 def sfx_play_fire():
     """Cannon fire sound - short sharp noise."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
@@ -621,6 +622,7 @@ def sfx_play_fire():
 
 
 @irq_helper
+@relocate(0xC140)
 def _sfx_start_clear():
     """Actually start the clear sound (called from tick after delay)."""
     # SID registers (memory-mapped)
@@ -649,6 +651,7 @@ def _sfx_start_clear():
 
 
 @irq_helper
+@relocate(0xC140)
 def sfx_play_hit():
     """Projectile hit sound - explosion noise. IRQ-safe."""
     # SID registers (memory-mapped)
@@ -672,6 +675,7 @@ def sfx_play_hit():
     active = 1
 
 
+@relocate(0xC140)
 def sfx_play_bibip():
     """Bi-bip sound - two short beeps with gap."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
@@ -699,6 +703,7 @@ def sfx_play_bibip():
     active = 3         # Arpeggio mode with note_len
 
 
+@relocate(0xC140)
 def sfx_play_slide():
     """Slide sound - quick 'sutty' swoosh upward."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
@@ -800,6 +805,7 @@ def sfx_tick():
 class _JoyInit:
     # This prevents instant fire when starting a new game after Game Over
     joy_delay: byte[ZP_JOY_DELAY] = 0
+
 
 @irq_helper
 def joy_handler():
@@ -1100,6 +1106,7 @@ def irq_title_handler(vic: byte, cia1: byte):
 
 
 @irq
+@relocate(0x33C)
 def irq_screen_handler(vic: byte, cia1: byte):
     """Screen IRQ handler."""
     if vic & 0x01:
@@ -1263,6 +1270,7 @@ class Screen:
         # Bank 3 ($C000-$FFFF)
         self.cia2_pra = self.cia2_pra & 0xFC  # Bank 3 ($C000-$FFFF)
 
+    @relocate(0x200)
     def __init__():
         # Initialize charset
         self.init_charset()
@@ -1300,6 +1308,7 @@ class Screen:
         """Print text centered at the given y position with an offset."""
         self.print_at(20 - len(text) / 2 + offset, y, text, col, bg)
 
+    @relocate(0x200)
     def print_center(y: byte, text: alias[string], col: byte, bg: byte):
         """Print text centered at the given y position."""
         self.print_center_at_offset(y, text, col, bg, 0)
@@ -1462,6 +1471,7 @@ class Random:
         """For non-power-of-2 values (still has modulo bias)"""
         return self.next() % max_val
 
+    @relocate(0xC140)
     def range_mask(mask: byte) -> byte:
         """FAST! Use for power-of-2 ranges: range_mask(0x1F) = 0-31"""
         return self.next() & mask
@@ -3000,11 +3010,13 @@ def title_screen() -> byte:
     return title_screen.wait_menu()
 
 
+@relocate(0x200)
 def story_screen():
     story_screen: StoryScreen
     story_screen()
 
 
+@relocate(0x200)
 def about_screen():
     about_screen: AboutScreen
     about_screen()
