@@ -254,11 +254,40 @@ COLOR_TITLE_TEXT = WHITE
 COLOR_STATUS_BG = DARK_GREY
 COLOR_STATUS_TEXT = LIGHT_GREY
 COLOR_STATUS_TEXT_HIGHLIGHT = WHITE
-COLOR_HIGHLIGHT_BG = WHITE
+COLOR_HIGHLIGHT_BG = LIGHT_GREY
 COLOR_STATUS_SHORTCUTS_HIGHLIGHT = ORANGE
 COLOR_STATUS_SHORTCUTS = YELLOW
 COLOR_CANNON = YELLOW
 COLOR_BULLET = WHITE
+COLOR_BULLET_YELLOW = YELLOW
+COLOR_BULLET_BLUE = BLUE
+
+# =============================================================================
+# SPECIAL BULLET CONFIGURATION
+# =============================================================================
+YELLOW_CHANCE_THRESHOLD = 20      # 255 * 0.10 ≈ 25 (for byte comparison)
+BLUE_CHANCE_THRESHOLD = 63        # 25 + 255 * 0.20 ≈ 63 (cumulative threshold)
+
+# Bullet types
+BULLET_TYPE_WHITE = 0
+BULLET_TYPE_YELLOW = 1
+BULLET_TYPE_BLUE = 2
+
+# Yellow bullet states (3-state machine):
+# State 0: Looking for first WALL (passes through empty space before first wall)
+# State 1: IN WALL - passing through wall blocks, looking for empty space after wall
+# State 2: IN EMPTY (after wall) - looking for end of empty area or next wall
+# State 3: AS WHITE - no gap found in row, behave like white bullet
+YELLOW_STATE_BEFORE_WALL = 0
+YELLOW_STATE_IN_WALL = 1
+YELLOW_STATE_IN_EMPTY = 2
+YELLOW_STATE_AS_WHITE = 3
+
+# "Next" indicator character codes (custom chars with embedded letters)
+CHAR_NEXT_TL = 39                 # Block top-left with "n"
+CHAR_NEXT_TR = 40                 # Block top-right with "e"
+CHAR_NEXT_BL = 41                 # Block bottom-left with "x"
+CHAR_NEXT_BR = 42                 # Block bottom-right with "t"
 COLOR_SPARKLE_1 = GREY        # Sparkle phase 1 (darker)
 COLOR_SPARKLE_2 = LIGHT_GREY  # Sparkle phase 2 (brighter)
 COLOR_GAME_OVER_FLASH = RED
@@ -306,8 +335,8 @@ TITLE_VIC_MULTICOLOR = 0x10       # $D016 bit 4
 TITLE_VIC_ECM_MODE = 0x40         # $D011 bit 6 (must be OFF for bitmap!)
 
 # Menu configuration
-MENU_ITEM_COUNT = 3               # Play, Credits, Story
-MENU_ROW_START = 22               # First menu row (screen row)
+MENU_ITEM_COUNT = 4               # Play, Story, About, Donate
+MENU_ROW_START = 21               # First menu row (screen row)
 
 # =============================================================================
 # SPRITE BLOCK INDICES
@@ -369,6 +398,12 @@ ZP_SFX_NOTE_LEN = 0x48     # byte: note length in frames (bi-bip mode)
 # Paused
 ZP_PAUSED = 0x35           # byte: pause state (0=running, 1=paused)
 
+# Yellow bullet state (free range: $3A-$3D)
+ZP_BULLET_TYPE = 0x3A      # byte: current bullet type (0=white, 1=yellow)
+ZP_NEXT_BULLET_TYPE = 0x3B # byte: next bullet type to fire (shown in "Next" indicator)
+ZP_YELLOW_STATE = 0x3C     # byte: yellow bullet state (0=in wall, 1=in empty)
+ZP_YELLOW_LAST_EMPTY = 0x3D # byte: last empty column found by yellow bullet
+
 # =============================================================================
 # Mapped memory addresses
 # =============================================================================
@@ -423,6 +458,20 @@ commodore_rainbow_data: tuple[byte] = (
     BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE, BLUE
 )
 
+# QR code for donate screen - bitstream (79 bytes, 625 bits continuous)
+# Bit=1 -> black ($20), Bit=0 -> white ($60)
+# URL: https://bit.ly/3LrekCv (PayPal donate link)
+qr_donate_data: tuple[byte] = (
+    0xFE, 0x7C, 0x3F, 0xC1, 0x6E, 0x10, 0x6E, 0xAA, 0x6B, 0xB7,
+    0x5F, 0xB5, 0xDB, 0xA0, 0x9A, 0xEC, 0x10, 0xD5, 0x07, 0xFA,
+    0xAA, 0xFE, 0x01, 0xC6, 0x00, 0x82, 0xD7, 0xE7, 0x4C, 0x87,
+    0xCF, 0x9C, 0xC5, 0x63, 0x6B, 0x3C, 0x7C, 0x93, 0x3B, 0x4B,
+    0x0C, 0x08, 0x4A, 0x8A, 0xD9, 0x97, 0xF7, 0x38, 0xD1, 0x6D,
+    0xBB, 0xAE, 0xFA, 0x00, 0x71, 0xC4, 0x3F, 0x92, 0x2A, 0x30,
+    0x42, 0x31, 0x0B, 0xA5, 0x1F, 0xBD, 0xD2, 0x75, 0x0E, 0xE9,
+    0x9A, 0x1B, 0x04, 0x19, 0xB1, 0xFE, 0x9C, 0xC4, 0x80
+)
+
 # Level system
 level_speeds_data: tuple[byte] = (208, 185, 161, 138, 116, 105, 94, 84, 77, 69)
 cleared_thresholds_data: tuple[word] = (10, 20, 40, 60, 80, 100, 120, 140, 160, 180)
@@ -443,6 +492,13 @@ char_35: relocate[tuple[byte], 0xC918] = (0x00, 0x00, 0x00, 0x00, 0x7E, 0x18, 0x
 char_36: relocate[tuple[byte], 0xC920] = (0x00, 0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00)  # T bottom
 char_37: relocate[tuple[byte], 0xC928] = (0x00, 0x00, 0x00, 0x00, 0x66, 0x66, 0x66, 0x7E)  # H top
 char_38: relocate[tuple[byte], 0xC930] = (0x00, 0x7E, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00)  # H bottom
+# "Next" indicator characters - block shape with embedded lowercase letters (XOR combination)
+# Calculated: block_frame XOR letter_bitmap = letter "cutout" in filled block
+# Letters shifted: "n","x" 1px right, "e","t" 1px left (to center the word visually)
+char_39: relocate[tuple[byte], 0xC938] = (0x00, 0x3F, 0x48, 0x44, 0x4C, 0x4C, 0x4C, 0x7F)  # TL + "n" (shifted right)
+char_40: relocate[tuple[byte], 0xC940] = (0x00, 0xFC, 0xC6, 0x9A, 0x82, 0x9E, 0xC2, 0xFE)  # TR + "e" (shifted left)
+char_41: relocate[tuple[byte], 0xC948] = (0x7F, 0x4C, 0x61, 0x73, 0x61, 0x4C, 0x3F, 0x00)  # BL + "x" (shifted right)
+char_42: relocate[tuple[byte], 0xC950] = (0xCE, 0x82, 0xCE, 0xCE, 0xCE, 0xE6, 0xFC, 0x00)  # BR + "t" (shifted left)
 # Game block characters
 char_59: relocate[tuple[byte], 0xC9D8] = (0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00)  # Progress bar
 char_60: relocate[tuple[byte], 0xC9E0] = (0x00, 0x3F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F)  # Block TL
@@ -796,6 +852,11 @@ def irq_handler(vic: byte, cia1: byte):
     sprite_en: byte[ZP_SPRITE_ENABLE]
     star_mask: byte[ZP_STAR_MASK]
 
+    # Yellow bullet state
+    bullet_type: byte[ZP_BULLET_TYPE]
+    yellow_state: byte[ZP_YELLOW_STATE]
+    yellow_last_empty: byte[ZP_YELLOW_LAST_EMPTY]
+
     # VIC sprite registers (direct access, no method calls in IRQ!)
     sprite_x0: byte[SPRITE_X]          # Sprite 0 X (cannon)
     sprite_y0: byte[SPRITE_Y]          # Sprite 0 Y (cannon)
@@ -819,6 +880,14 @@ def irq_handler(vic: byte, cia1: byte):
     color: byte
     collision: byte
     i: byte
+    block_color: byte
+
+    # Yellow bullet scan variables
+    scan_col: byte
+    found_empty: byte
+    target_col: byte
+    scan_color: byte
+    scan_pos: word
 
     # Sparkle effect variables (single sprite)
     sparkle_phase: byte[ZP_SPARKLE_PHASE]
@@ -857,23 +926,47 @@ def irq_handler(vic: byte, cia1: byte):
 
             # Check right edge first (328 = 344 - 16 visible sprite width)
             if next_x > 328:
+                # Edge hit - handle differently for yellow bullet
                 bullet_hit = 1
-                bullet_hit_col = GRID_WIDTH  # Edge hit marker
                 bullet_active = 0
                 collision = 1
-                # Play hit sound
                 sfx_play_hit()
-                # Hide bullet sprite IMMEDIATELY to prevent flash-back glitch
                 sprite_en = sprite_en & 0xFD
                 sprite_enable = sprite_en | star_mask
 
-                # IMMEDIATELY place player block at rightmost column
                 screen_y = PLAY_TOP + bullet_row * BLOCK_HEIGHT
-                pos = row_offset_data[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
-                color_ram[pos] = WHITE
-                color_ram[pos + 1] = WHITE
-                color_ram[pos + 40] = WHITE
-                color_ram[pos + 41] = WHITE
+
+                # Edge reached - place block based on bullet type and state
+                bullet_hit_col = GRID_WIDTH
+
+                if bullet_type == BULLET_TYPE_YELLOW:
+                    # Yellow bullet: check state for placement
+                    if yellow_state == YELLOW_STATE_AS_WHITE:
+                        # AS_WHITE: no gap exists, place at edge (like white)
+                        pos = row_offset_data[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
+                    elif yellow_last_empty < GRID_WIDTH:
+                        # IN_EMPTY/BEFORE_WALL: use last empty (the gap position)
+                        pos = row_offset_data[screen_y] + word(yellow_last_empty) * BLOCK_WIDTH
+                    else:
+                        # No empty found (0xFF) - place at edge
+                        pos = row_offset_data[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
+                    color_ram[pos] = YELLOW
+                    color_ram[pos + 1] = YELLOW
+                    color_ram[pos + 40] = YELLOW
+                    color_ram[pos + 41] = YELLOW
+                else:
+                    # White/Blue bullet: always place at edge
+                    pos = row_offset_data[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
+                    if bullet_type == BULLET_TYPE_WHITE:
+                        color_ram[pos] = WHITE
+                        color_ram[pos + 1] = WHITE
+                        color_ram[pos + 40] = WHITE
+                        color_ram[pos + 41] = WHITE
+                    else:
+                        color_ram[pos] = BLUE
+                        color_ram[pos + 1] = BLUE
+                        color_ram[pos + 40] = BLUE
+                        color_ram[pos + 41] = BLUE
             else:
                 # Check block collision at NEXT position (sprite right edge = +16)
                 screen_x = (next_x + 16 - SPRITE_X_OFFSET) / 8
@@ -885,29 +978,75 @@ def irq_handler(vic: byte, cia1: byte):
                     pos = row_offset_data[screen_y] + word(grid_col) * BLOCK_WIDTH
 
                     # Check ALL 4 corners of the block!
-                    # During scroll, some corners may be BLACK (already copied) while others aren't
                     color = (color_ram[pos] | color_ram[pos + 1] | color_ram[pos + 40] | color_ram[pos + 41]) & 0x0F
-                    if color != BLACK:
-                        # Block hit! Don't move, set hit flag
-                        bullet_hit = 1
-                        bullet_hit_col = grid_col
-                        bullet_active = 0
-                        collision = 1
-                        # Play hit sound
-                        sfx_play_hit()
-                        # Hide bullet sprite IMMEDIATELY to prevent flash-back glitch
-                        sprite_en = sprite_en & 0xFD
-                        sprite_enable = sprite_en | star_mask
 
-                        # IMMEDIATELY place player block at hit_col - 1 (if valid)
-                        # This ensures block is placed even during scroll
-                        if grid_col > 0:
-                            pos = row_offset_data[screen_y] + word(grid_col - 1) * BLOCK_WIDTH
-                            # Draw white block (2x2)
-                            color_ram[pos] = WHITE
-                            color_ram[pos + 1] = WHITE
-                            color_ram[pos + 40] = WHITE
-                            color_ram[pos + 41] = WHITE
+                    # === STOP AT WALL: WHITE, BLUE, or YELLOW-AS-WHITE ===
+                    # All three behave the same: stop at first wall, place block before it
+                    if bullet_type != BULLET_TYPE_YELLOW or yellow_state == YELLOW_STATE_AS_WHITE:
+                        if color != BLACK:
+                            # Block hit! Stop here
+                            bullet_hit = 1
+                            bullet_hit_col = grid_col
+                            bullet_active = 0
+                            collision = 1
+                            sfx_play_hit()
+                            sprite_en = sprite_en & 0xFD
+                            sprite_enable = sprite_en | star_mask
+
+                            if grid_col > 0:
+                                pos = row_offset_data[screen_y] + word(grid_col - 1) * BLOCK_WIDTH
+                                if bullet_type == BULLET_TYPE_WHITE:
+                                    color_ram[pos] = WHITE
+                                    color_ram[pos + 1] = WHITE
+                                    color_ram[pos + 40] = WHITE
+                                    color_ram[pos + 41] = WHITE
+                                elif bullet_type == BULLET_TYPE_BLUE:
+                                    color_ram[pos] = COLOR_BULLET_BLUE
+                                    color_ram[pos + 1] = COLOR_BULLET_BLUE
+                                    color_ram[pos + 40] = COLOR_BULLET_BLUE
+                                    color_ram[pos + 41] = COLOR_BULLET_BLUE
+                                else:
+                                    color_ram[pos] = YELLOW
+                                    color_ram[pos + 1] = YELLOW
+                                    color_ram[pos + 40] = YELLOW
+                                    color_ram[pos + 41] = YELLOW
+
+                    # === YELLOW BULLET: State machine (BEFORE_WALL, IN_WALL, IN_EMPTY) ===
+                    elif yellow_state == YELLOW_STATE_BEFORE_WALL:
+                        if color != BLACK:
+                            # Hit first wall - switch to IN_WALL state, continue moving
+                            yellow_state = YELLOW_STATE_IN_WALL
+                        else:
+                            # Empty space before wall - remember as potential landing spot
+                            yellow_last_empty = grid_col
+                    elif yellow_state == YELLOW_STATE_IN_WALL:
+                        if color == BLACK:
+                            # Found gap after wall! Switch to IN_EMPTY
+                            yellow_state = YELLOW_STATE_IN_EMPTY
+                            yellow_last_empty = grid_col
+                        # else: Still in wall, continue moving
+                    else:
+                        # YELLOW_STATE_IN_EMPTY - in gap, looking for end
+                        if color != BLACK:
+                            # Wall after gap - STOP and place block at last empty!
+                            bullet_hit = 1
+                            bullet_hit_col = grid_col
+                            bullet_active = 0
+                            collision = 1
+                            sfx_play_hit()
+                            sprite_en = sprite_en & 0xFD
+                            sprite_enable = sprite_en | star_mask
+
+                            # Place block at last empty position
+                            if yellow_last_empty < GRID_WIDTH:
+                                pos = row_offset_data[screen_y] + word(yellow_last_empty) * BLOCK_WIDTH
+                                color_ram[pos] = YELLOW
+                                color_ram[pos + 1] = YELLOW
+                                color_ram[pos + 40] = YELLOW
+                                color_ram[pos + 41] = YELLOW
+                        else:
+                            # Still in gap - update last empty position
+                            yellow_last_empty = grid_col
 
             # Only move and update sprite if no collision
             if collision == 0:
@@ -1148,6 +1287,25 @@ class Screen:
         self.vic_ctrl2 = self.vic_ctrl2 & (0xFF ^ TITLE_VIC_MULTICOLOR)
         # Bank 3 ($C000-$FFFF)
         self.cia2_pra = self.cia2_pra & 0xFC  # Bank 3 ($C000-$FFFF)
+        __cli__()
+
+    def set_text_mode():
+        """Configure VIC for standard text mode (no ECM) - for screens with graphics chars."""
+        # Set background and border colors
+        self.background = COLOR_SCREEN_BG
+        self.border = COLOR_SCREEN_BG
+        # Clear screen
+        memfill(self.screen, 32)
+        memfill(self.colors, BLACK)
+        __sei__()
+        # Configure VIC for standard text mode
+        self.vic_memptr = GAME_MEMPTR
+        # ECM OFF, DEN ON, Bitmap OFF, preserve raster MSB (bit 7 masked)
+        self.vic_ctrl1 = (self.vic_ctrl1 & 0x9F) | VIC_DEN
+        # Multicolor OFF
+        self.vic_ctrl2 = self.vic_ctrl2 & (0xFF ^ TITLE_VIC_MULTICOLOR)
+        # Bank 3 ($C000-$FFFF)
+        self.cia2_pra = self.cia2_pra & 0xFC
         __cli__()
 
     def set_bitmap_mode():
@@ -1605,6 +1763,54 @@ class Game:
     sprite_en_zp: byte[ZP_SPRITE_ENABLE]
     star_mask_zp: byte[ZP_STAR_MASK]
 
+    # Yellow bullet ZP mappings
+    bullet_type_zp: byte[ZP_BULLET_TYPE]
+    next_bullet_type_zp: byte[ZP_NEXT_BULLET_TYPE]
+    yellow_state_zp: byte[ZP_YELLOW_STATE]
+    yellow_last_empty_zp: byte[ZP_YELLOW_LAST_EMPTY]
+
+    def draw_next_indicator():
+        """Draw the 2x2 'Next' indicator block at columns 0-1, rows 23-24."""
+        next_type: byte[ZP_NEXT_BULLET_TYPE]
+        color: byte
+        bg_color: byte = BG_STATUS
+
+        # Determine color based on next bullet type
+        if next_type == BULLET_TYPE_YELLOW:
+            color = COLOR_BULLET_YELLOW
+        elif next_type == BULLET_TYPE_BLUE:
+            color = COLOR_BULLET_BLUE
+            bg_color = BG_HIGHLIGHT
+        else:
+            color = COLOR_BULLET
+
+        # Draw 2x2 block with "next" characters (ECM background 2 = status bar)
+        Screen.screen[40 * 23 + 1] = CHAR_NEXT_TL + bg_color
+        Screen.screen[40 * 23 + 2] = CHAR_NEXT_TR + bg_color
+        Screen.screen[40 * 24 + 1] = CHAR_NEXT_BL + bg_color
+        Screen.screen[40 * 24 + 2] = CHAR_NEXT_BR + bg_color
+
+        # Set color for all 4 characters
+        Screen.colors[40 * 23 + 1] = color
+        Screen.colors[40 * 23 + 2] = color
+        Screen.colors[40 * 24 + 1] = color
+        Screen.colors[40 * 24 + 2] = color
+
+    def determine_next_bullet():
+        """Randomly determine the next bullet type."""
+        next_type: byte[ZP_NEXT_BULLET_TYPE]
+        rnd: byte
+
+        rnd = Random.next()
+        if rnd < YELLOW_CHANCE_THRESHOLD:
+            next_type = BULLET_TYPE_YELLOW
+        elif rnd < BLUE_CHANCE_THRESHOLD:
+            next_type = BULLET_TYPE_BLUE
+        else:
+            next_type = BULLET_TYPE_WHITE
+
+        self.draw_next_indicator()
+
     def draw_title():
         """Draw title bar (rows 0-1) with ECM background and half-characters."""
         screen_title: array[byte, 80][SCREEN] = [CHAR_SPACE + BG_TITLE]
@@ -1631,13 +1837,13 @@ class Game:
         label_color: byte
         display_value: word
 
-        Screen.print_number(8, 23, self.cols_cleared, 5, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(14, 23, self.cols_cleared, 5, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
         if self.level_flash == 0:
-            Screen.print_number(20, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+            Screen.print_number(26, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
 
         # Show "H-" prefix and high score, or current score
         if self.showing_high_score and HighScore.value > 0:
-            Screen.print_at(0, 24, "H-", COLOR_HIGH_SCORE_LABEL, BG_STATUS)
+            Screen.print_at(6, 24, "H-", COLOR_HIGH_SCORE_LABEL, BG_STATUS)
             display_value = HighScore.value
             label_color = COLOR_HIGH_SCORE_LABEL
             score_color = COLOR_HIGH_SCORE
@@ -1651,13 +1857,12 @@ class Game:
                 if not self.high_score_beaten:
                     self.high_score_beaten = True
                     sfx_play_bibip()
-                Screen.print_at(0, 24, "B-", COLOR_STATUS_TEXT, BG_STATUS)
+                Screen.print_at(6, 24, "B-", COLOR_STATUS_TEXT, BG_STATUS)
             else:
-                Screen.print_at(0, 24, "  ", COLOR_STATUS_TEXT, BG_STATUS)
+                Screen.print_at(6, 24, "  ", COLOR_STATUS_TEXT, BG_STATUS)
 
-        Screen.print_at(2, 24, "SCORE:", label_color, BG_STATUS)
-        Screen.print_number(8, 24, display_value, 5, score_color, BG_STATUS)
-
+        Screen.print_at(8, 24, "SCORE:", label_color, BG_STATUS)
+        Screen.print_number(14, 24, display_value, 5, score_color, BG_STATUS)
 
     def update_score_display():
         """Handle alternating score/high score display (call every frame)."""
@@ -1676,9 +1881,9 @@ class Game:
         phase = self.level_flash / 8  # 0-9 → 5 full cycles
         # Odd phase = inverse (white bg + dark text), even = normal
         if phase & 1:
-            Screen.print_number(20, 23, word(self.level), 2, DARK_GREY, BG_HIGHLIGHT)
+            Screen.print_number(26, 23, word(self.level), 2, DARK_GREY, BG_HIGHLIGHT)
         else:
-            Screen.print_number(20, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+            Screen.print_number(26, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
         self.level_flash -= 1
 
     def update_time():
@@ -1691,9 +1896,8 @@ class Game:
         minutes = game_seconds / 60
         secs = game_seconds % 60
 
-        # Display at position 32: "T:00:00"
-        Screen.print_number(20, 24, minutes, 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
-        Screen.print_number(23, 24, secs, 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(26, 24, minutes, 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(29, 24, secs, 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
 
     def draw_pause():
         """Highlight PAUSE text in status bar."""
@@ -1717,13 +1921,16 @@ class Game:
         pos: word
         screen_status: array[byte, 80][SCREEN + 40 * 23] = [CHAR_SPACE + BG_STATUS]
 
-        Screen.print_at(2, 24, "SCORE:", COLOR_STATUS_TEXT, BG_STATUS)
-        Screen.print_at(0, 23, "CLEARED:", COLOR_STATUS_TEXT, BG_STATUS)
-        Screen.print_at(14, 23, "LEVEL:", COLOR_STATUS_TEXT, BG_STATUS)
-        Screen.print_at(15, 24, "TIME:", COLOR_STATUS_TEXT, BG_STATUS)
-        Screen.print_at(22, 24, ":", COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_at(8, 24, "SCORE:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(6, 23, "CLEARED:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(20, 23, "LEVEL:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(21, 24, "TIME:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(28, 24, ":", COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
 
-        # Draw showrtcuts
+        # Draw "Next" indicator (2x2 block at columns 0-1, rows 23-24)
+        self.draw_next_indicator()
+
+        # Draw shortcuts
         self.draw_pause()
         Screen.print_at(35, 24, "Q", COLOR_STATUS_SHORTCUTS, BG_STATUS)
         Screen.print_at(36, 24, "UIT", COLOR_STATUS_TEXT, BG_STATUS)
@@ -2057,6 +2264,7 @@ class Game:
 
                 # Remove the column (shifts left columns right)
                 self.grid.remove_complete_column(self.effect_col)
+                sfx_play_slide()  # Slide sound for the column shift
 
                 # Update score (cascade clears give bonus points!)
                 # Formula: base_score + (level - 1) * level_bonus
@@ -2212,6 +2420,13 @@ class Game:
         """Fire bullet (sets ZP variables, IRQ handles movement)."""
         start_x: word
         start_y: byte
+        scan_col: byte
+        scan_pos: word
+        scan_color: byte
+        found_wall: byte
+        has_gap: byte
+        screen_y: byte
+        color_ram: array[byte, 1000][COLOR]
 
         # Can't fire if bullet already active, effect is playing, or cascade is active
         if self.bullet_active_zp != 0 or self.effect_phase != 0 or self.cascade_phase != CASCADE_IDLE:
@@ -2233,6 +2448,40 @@ class Game:
         self.score -= 1
         self.update_status()
         self.update_col_num()
+
+        # Set current bullet type from "next" indicator, then determine next one
+        self.bullet_type_zp = self.next_bullet_type_zp
+
+        # Initialize yellow bullet state machine
+        if self.bullet_type_zp == BULLET_TYPE_YELLOW:
+            # Pre-scan the row to check if there's a gap (wall followed by empty)
+            screen_y = PLAY_TOP + self.cannon_row_zp * BLOCK_HEIGHT
+            found_wall = 0
+            has_gap = 0
+            scan_col = 1  # Start after cannon column
+
+            while scan_col < GRID_WIDTH and has_gap == 0:
+                scan_pos = row_offset_data[screen_y] + word(scan_col) * BLOCK_WIDTH
+                scan_color = (color_ram[scan_pos] | color_ram[scan_pos + 1] | color_ram[scan_pos + 40] | color_ram[scan_pos + 41]) & 0x0F
+                if scan_color != BLACK:
+                    # Hit a wall
+                    found_wall = 1
+                elif found_wall != 0:
+                    # Empty after wall = gap found!
+                    has_gap = 1
+                scan_col += 1
+
+            if has_gap != 0:
+                # Gap exists - use normal yellow 3-state machine
+                self.yellow_state_zp = YELLOW_STATE_BEFORE_WALL
+            else:
+                # No gap - behave like white (stop at first wall)
+                self.yellow_state_zp = YELLOW_STATE_AS_WHITE
+            self.yellow_last_empty_zp = 0xFF  # Reset to invalid marker
+
+        # Determine next bullet type and update indicator
+        # (sprite color will be set in handle_bullet_hit when this bullet lands)
+        self.determine_next_bullet()
 
         # Switch cannon sprite to "fired" state (empty barrel)
         Screen.sprite_ptr[0] = CANNON_BLOCK_FIRED
@@ -2289,7 +2538,7 @@ class Game:
             self.running = False
 
     def handle_bullet_hit():
-        """Handle bullet hit - IRQ already placed block."""
+        """Handle bullet hit - IRQ places blocks, we just do housekeeping."""
         hit_col: byte
 
         if self.bullet_hit_zp == 0:
@@ -2297,6 +2546,14 @@ class Game:
 
         self.bullet_hit_zp = 0
         hit_col = self.bullet_hit_col_zp
+
+        # Set sprite color for NEXT waiting bullet (before it becomes visible!)
+        if self.next_bullet_type_zp == BULLET_TYPE_YELLOW:
+            Screen.sprite_color[1] = COLOR_BULLET_YELLOW
+        elif self.next_bullet_type_zp == BULLET_TYPE_BLUE:
+            Screen.sprite_color[1] = COLOR_BULLET_BLUE
+        else:
+            Screen.sprite_color[1] = COLOR_BULLET
 
         # Hit column 0 means no block was placed
         if hit_col == 0:
@@ -2585,9 +2842,14 @@ class Game:
         self.column_speed = level_speeds_data[0]  # Level 1 speed from tuple
         self.last_jiffy = jiffy_lo  # Initialize delta timing baseline
 
+        # Initialize bullet types - first bullet is ALWAYS white for consistency
+        self.bullet_type_zp = BULLET_TYPE_WHITE
+        self.next_bullet_type_zp = BULLET_TYPE_WHITE  # First shown in "Next" is also white
+        # Sprite color will be set to white by init_sprites() below
+
         # Draw title screen
         self.draw_title()
-        # Draw status bar
+        # Draw status bar (includes "Next" indicator)
         self.draw_status()
 
         # Initialize sprites
@@ -2629,6 +2891,23 @@ class Game:
 # SCREEN CLASSES
 # =============================================================================
 
+def press_a_key(x: byte, y: byte):
+    visible: bool = False
+    color: byte = BLACK
+    while True:
+        if visible:
+            color = BLACK
+            visible = False
+        else:
+            color = LIGHT_BLUE
+            visible = True
+        Screen.print_at(x, y, "PRESS A KEY!", color, BG_PLAY)
+        for _ in range(10):
+            Screen.wait_frames(2)
+            if getkey() != 0:
+                return
+
+
 class TitleScreen:
     """Title screen with RLE compressed Koala image and raster-split menu."""
     # Memory-mapped destinations (VIC Bank 3)
@@ -2660,6 +2939,7 @@ class TitleScreen:
         Screen.print_center_at_offset(MENU_ROW_START, "PLAY GAME", COLOR_MENU_NORMAL, 0, -1)
         Screen.print_center_at_offset(MENU_ROW_START + 1, "STORY", COLOR_MENU_NORMAL, 0, -1)
         Screen.print_center_at_offset(MENU_ROW_START + 2, "ABOUT", COLOR_MENU_NORMAL, 0, -1)
+        Screen.print_center_at_offset(MENU_ROW_START + 3, "DONATE ME", COLOR_MENU_NORMAL, 0, -1)
 
     def update_menu_highlight():
         """Update menu item colors based on selection."""
@@ -2766,24 +3046,8 @@ class StoryScreen:
         Screen.print_center(21, "EVACUATION IN PROGRESS", YELLOW, 0)
         Screen.print_center(22, "13337 LIVES AT STAKE", YELLOW, 0)
 
-        # Prompt
-        Screen.print_center(24, "PRESS A KEY!", LIGHT_BLUE, 0)
-
     def loop():
-        visible: bool = True
-        while True:
-            for _ in range(10):
-                Screen.wait_frames(2)
-                if getkey() != 0:
-                    return
-            if visible:
-                # Hide prompt
-                Screen.print_center(24, "PRESS A KEY!", BLACK, 0)
-                visible = False
-            else:
-                # Show prompt
-                Screen.print_center(24, "PRESS A KEY!", LIGHT_BLUE, 0)
-                visible = True
+        press_a_key(14, 24)
 
     def __init__():
         Screen.sync_raster(250)
@@ -2824,30 +3088,78 @@ class AboutScreen:
         Screen.print_center(21, "ARROWS / WASD / JOYSTICK 2", LIGHT_GREY, 0)
         Screen.print_center(22, "SPACE / FIRE", LIGHT_GREY, 0)
 
-        # Prompt
-        Screen.print_center(24, "PRESS A KEY!", LIGHT_BLUE, 0)
-
     def loop():
-        visible: bool = True
-        while True:
-            for _ in range(10):
-                Screen.wait_frames(2)
-                if getkey() != 0:
-                    return
-            if visible:
-                # Hide prompt
-                Screen.print_center(24, "PRESS A KEY!", BLACK, 0)
-                visible = False
-            else:
-                # Show prompt
-                Screen.print_center(24, "PRESS A KEY!", LIGHT_BLUE, 0)
-                visible = True
+        press_a_key(14, 24)
 
     def __init__():
         Screen.sync_raster(250)
         # Set game mode (ECM text mode)
         Screen.set_game_mode()
         # Draw about content
+        self.draw()
+        # Wait for keypress
+        self.loop()
+
+
+class DonateScreen:
+    """Donate screen - displays QR code for PayPal donation using ECM mode."""
+
+    def draw_qr():
+        """Draw 25x25 QR code from bitstream data, right-aligned."""
+        pos: word
+        row: byte
+        col: byte
+        byte_idx: byte = 0
+        bit_mask: byte = 0x80
+        data_byte: byte
+        char: byte
+
+        # QR code position: right side of screen (col 15 = 40-25)
+        # Bitstream format: 625 bits continuous in 79 bytes, MSB first
+        # Bit=1 -> $20 (black/BG0), Bit=0 -> $60 (white/BG1)
+        data_byte = qr_donate_data[0]
+        for row in range(25):
+            pos = row_offset_data[row] + 15
+            for col in range(25):
+                if data_byte & bit_mask:
+                    char = CHAR_SPACE + BG_PLAY
+                else:
+                    char = CHAR_SPACE + BG_HIGHLIGHT
+                Screen.screen[pos] = char
+                pos += 1
+                bit_mask = bit_mask >> 1
+                if bit_mask == 0:
+                    bit_mask = 0x80
+                    byte_idx += 1
+                    data_byte = qr_donate_data[byte_idx]
+
+    def draw():
+        """Draw donate screen content (left side text)."""
+        # Title
+        Screen.print_at(2, 2, "DONATE ME", CYAN, 0)
+
+        # Thank you message
+        Screen.print_at(1, 6, "IF YOU LIKE", LIGHT_GREY, 0)
+        Screen.print_at(2, 7, "SLOTSHOT,", WHITE, 0)
+        Screen.print_at(1, 8, "SUPPORT ME!", LIGHT_GREY, 0)
+
+        # QR instruction
+        Screen.print_at(3, 11, "SCAN QR", YELLOW, 0)
+        Screen.print_at(2, 12, "WITH YOUR", LIGHT_GREY, 0)
+        Screen.print_at(4, 13, "PHONE", LIGHT_GREY, 0)
+
+        # Thank you
+        Screen.print_at(2, 16, "THANK YOU", GREEN, 0)
+
+    def loop():
+        """Wait for keypress with blinking prompt."""
+        press_a_key(1, 23)
+
+    def __init__():
+        Screen.sync_raster(250)
+        Screen.set_game_mode()
+        # Draw content
+        self.draw_qr()
         self.draw()
         # Wait for keypress
         self.loop()
@@ -2876,6 +3188,12 @@ def story_screen():
 def about_screen():
     about_screen: AboutScreen
     about_screen()
+
+
+@relocate(0x200)
+def donate_screen():
+    donate_screen: DonateScreen
+    donate_screen()
 
 
 def game():
@@ -2921,4 +3239,8 @@ def main():
         elif menu_choice == 2:
             # ABOUT selected
             about_screen()
+
+        elif menu_choice == 3:
+            # DONATE selected
+            donate_screen()
 
