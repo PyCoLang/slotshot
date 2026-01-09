@@ -25,7 +25,7 @@ include("musicplayer")
 # Full Memory Map:
 #   $0400-$0427: Column blit buffer (40 bytes)
 #   $0428-$06A7: Column pool (640 bytes, pre-generated patterns)
-#   $06A8-$07FF: FREE (344 bytes)
+#   $06A9-$07FF: FREE (344 bytes)
 #   $0801-$B238: Program (code + data + BSS, ~43KB)
 #   $B239-$BFFF: Stack headroom (~3KB)
 #
@@ -267,8 +267,10 @@ COLOR_BULLET_BLUE = BLUE
 # =============================================================================
 # SPECIAL BULLET CONFIGURATION
 # =============================================================================
-YELLOW_CHANCE_THRESHOLD = 20      # 255 * 0.10 ≈ 25 (for byte comparison)
-BLUE_CHANCE_THRESHOLD = 63        # 25 + 255 * 0.20 ≈ 63 (cumulative threshold)
+# 255 * 0.10 ≈ 25 (for byte comparison)
+# 25 + 255 * 0.20 ≈ 63 (cumulative threshold)
+YELLOW_CHANCE_THRESHOLD = 15
+BLUE_CHANCE_THRESHOLD = 60
 
 # Bullet types
 BULLET_TYPE_WHITE = 0
@@ -292,7 +294,7 @@ CHAR_NEXT_BL = 41                 # Block bottom-left with "x"
 CHAR_NEXT_BR = 42                 # Block bottom-right with "t"
 COLOR_SPARKLE_1 = GREY        # Sparkle phase 1 (darker)
 COLOR_SPARKLE_2 = LIGHT_GREY  # Sparkle phase 2 (brighter)
-COLOR_GAME_OVER_FLASH = RED
+COLOR_GAME_OVER_FLASH = LIGHT_RED
 
 # HIGH SCORE CONFIGURATION
 COLOR_HIGH_SCORE_LABEL = GREY
@@ -306,6 +308,9 @@ BLOCK_COLORS_MASK = 7         # Bitmask for 8 colors (0-7)
 COLOR_MENU_NORMAL = LIGHT_BLUE
 COLOR_MENU_SELECTED = LIGHT_GREY
 COLOR_MENU_BG = BLACK
+
+# Star sprite color
+STAR_COLOR = LIGHT_GREY
 
 # =============================================================================
 # TITLE SCREEN CONFIGURATION (Raster Split Bitmap/Text)
@@ -406,15 +411,12 @@ ZP_NEXT_BULLET_TYPE = 0x3B # byte: next bullet type to fire (shown in "Next" ind
 ZP_YELLOW_STATE = 0x3C     # byte: yellow bullet state (0=in wall, 1=in empty)
 ZP_YELLOW_LAST_EMPTY = 0x3D # byte: last empty column found by yellow bullet
 
+ZP_MENU_SELECTED = 0x40    # byte: selected menu item (0-3)
+
 # =============================================================================
 # Mapped memory addresses
 # =============================================================================
 
-IRQ_LOADING_ADDR = 0x400
-IRQ_LOADING_BORDER_HEIGHT = 64
-
-# Star sprite color
-STAR_COLOR = LIGHT_GREY
 
 # =============================================================================
 # CASCADE STATE MACHINE CONSTANTS
@@ -508,6 +510,31 @@ char_61: relocate[tuple[byte], 0xC9E8] = (0x00, 0xFC, 0xFE, 0xFE, 0xFE, 0xFE, 0x
 char_62: relocate[tuple[byte], 0xC9F0] = (0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x3F, 0x00)  # Block BL
 char_63: relocate[tuple[byte], 0xC9F8] = (0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFC, 0x00)  # Block BR
 
+# Title screen character codes (bottom and top halves)
+title_row0_data: tuple[byte] = (27, 29, 31, 35, 27, 37, 31, 35)
+title_row1_data: tuple[byte] = (28, 30, 34, 36, 28, 38, 34, 36)
+
+# Star positions (x, y pairs for sprites)
+title_star_positions_data: tuple[word] = (
+    57, 243,
+    99, 219,
+    249, 213,
+    271, 249,
+    311, 231
+)
+game_star_positions_data: tuple[word] = (
+    57, 95,
+    98, 189,
+    175, 142,
+    261, 201,
+    283, 102
+)
+game_star_color_positions_data: tuple[word] = (204, 689, 459, 749, 272)
+
+bitmap_rle: tuple[byte] = SLOTSHOT_BITMAP_RLE
+screen_rle: tuple[byte] = SLOTSHOT_SCREEN_RLE
+colorram_rle: tuple[byte] = SLOTSHOT_COLORRAM_RLE
+
 # Sprite data - 64 bytes each, at $C000 in VIC Bank 3
 # Same target address = consecutive placement (cannon_ready, cannon_fired, bullet, sparkle)
 cannon_sprite_ready: relocate[tuple[byte], 0xC000] = (
@@ -551,31 +578,6 @@ sparkle_sprite: relocate[tuple[byte], 0xC000] = (
     0x00
 )
 
-# Title screen character codes (bottom and top halves)
-title_row0_data: tuple[byte] = (27, 29, 31, 35, 27, 37, 31, 35)
-title_row1_data: tuple[byte] = (28, 30, 34, 36, 28, 38, 34, 36)
-
-# Star positions (x, y pairs for sprites)
-title_star_positions_data: tuple[word] = (
-    57, 243,
-    99, 219,
-    249, 213,
-    271, 249,
-    311, 231
-)
-game_star_positions_data: tuple[word] = (
-    57, 95,
-    98, 189,
-    175, 142,
-    261, 201,
-    283, 102
-)
-game_star_color_positions_data: tuple[word] = (204, 689, 459, 749, 272)
-
-bitmap_rle: tuple[byte] = SLOTSHOT_BITMAP_RLE
-screen_rle: tuple[byte] = SLOTSHOT_SCREEN_RLE
-colorram_rle: tuple[byte] = SLOTSHOT_COLORRAM_RLE
-
 
 # =============================================================================
 # SOUND EFFECTS
@@ -598,24 +600,15 @@ class _SFXInit:
 def sfx_play_fire():
     """Cannon fire sound - short sharp noise."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
-    freq: word[SID_CH3_FREQ]
-    ctrl: byte[SID_CH3_CTRL]
-    ad: byte[SID_CH3_AD]
-    sr: byte[SID_CH3_SR]
+    freq: word[SID_CH3_FREQ] = 0xb000
+    ctrl: byte[SID_CH3_CTRL] = 0x81
+    ad: byte[SID_CH3_AD] = 0x87
+    sr: byte[SID_CH3_SR] = 0x20
     # State (ZP) - irq_safe because sfx_tick reads these from IRQ
-    active: byte[ZP_SFX_ACTIVE]
-    timer: byte[ZP_SFX_TIMER]
-    curr_freq: irq_safe[word[ZP_SFX_FREQ]]
-    delta: sbyte[ZP_SFX_DELTA]
-
-    curr_freq = 0xb000
-    freq = curr_freq
-    ad = 0x07
-    sr = 0x20
-    ctrl = 0x81
-    delta = -1000
-    timer = 9
-    active = 1
+    active: byte[ZP_SFX_ACTIVE] = 1
+    timer: byte[ZP_SFX_TIMER] = 9
+    curr_freq: irq_safe[word[ZP_SFX_FREQ]] = 0xb000
+    delta: sbyte[ZP_SFX_DELTA] = -1000
 
 
 @irq_helper
@@ -623,28 +616,17 @@ def sfx_play_fire():
 def _sfx_start_clear():
     """Actually start the clear sound (called from tick after delay)."""
     # SID registers (memory-mapped)
-    freq: word[SID_CH3_FREQ]
-    ctrl: byte[SID_CH3_CTRL]
-    ad: byte[SID_CH3_AD]
-    sr: byte[SID_CH3_SR]
+    freq: word[SID_CH3_FREQ] = 0x1000
+    ctrl: byte[SID_CH3_CTRL] = 0x11
+    ad: byte[SID_CH3_AD] = 0x00
+    sr: byte[SID_CH3_SR] = 0xF0
     # State (ZP)
-    active: byte[ZP_SFX_ACTIVE]
-    timer: byte[ZP_SFX_TIMER]
-    curr_freq: word[ZP_SFX_FREQ]
-    delta: sbyte[ZP_SFX_DELTA]
-    phase: byte[ZP_SFX_PHASE]
-    note_len: byte[ZP_SFX_NOTE_LEN]
-
-    curr_freq = 0x1000
-    freq = curr_freq
-    ad = 0x00
-    sr = 0xF0
-    ctrl = 0x11
-    delta = 5
-    timer = 4
-    phase = 0
-    note_len = 2       # Short notes for arpeggio effect
-    active = 3
+    active: byte[ZP_SFX_ACTIVE] = 3
+    timer: byte[ZP_SFX_TIMER] = 4
+    curr_freq: word[ZP_SFX_FREQ] = 0x1000
+    delta: sbyte[ZP_SFX_DELTA] = 5
+    phase: byte[ZP_SFX_PHASE] = 0
+    note_len: byte[ZP_SFX_NOTE_LEN] = 2       # Short notes for arpeggio effect
 
 
 @irq_helper
@@ -652,76 +634,47 @@ def _sfx_start_clear():
 def sfx_play_hit():
     """Projectile hit sound - explosion noise. IRQ-safe."""
     # SID registers (memory-mapped)
-    freq: word[SID_CH3_FREQ]
-    ctrl: byte[SID_CH3_CTRL]
-    ad: byte[SID_CH3_AD]
-    sr: byte[SID_CH3_SR]
+    freq: word[SID_CH3_FREQ] = 0x1500
+    ctrl: byte[SID_CH3_CTRL] = 0x81
+    ad: byte[SID_CH3_AD] = 0x08
+    sr: byte[SID_CH3_SR] = 0x00
     # State (ZP)
-    active: byte[ZP_SFX_ACTIVE]
-    timer: byte[ZP_SFX_TIMER]
-    curr_freq: word[ZP_SFX_FREQ]
-    delta: sbyte[ZP_SFX_DELTA]
-
-    curr_freq = 0x1500
-    freq = curr_freq
-    ad = 0x08
-    sr = 0x00
-    ctrl = 0x81
-    delta = 100
-    timer = 10
-    active = 1
+    active: byte[ZP_SFX_ACTIVE] = 1
+    timer: byte[ZP_SFX_TIMER] = 10
+    curr_freq: word[ZP_SFX_FREQ] = 0x1500
+    delta: sbyte[ZP_SFX_DELTA] = 100
 
 
 @relocate(0xC140)
 def sfx_play_bibip():
     """Bi-bip sound - two short beeps with gap."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
-    freq: irq_safe[word[SID_CH3_FREQ]]
-    ctrl: byte[SID_CH3_CTRL]
-    ad: byte[SID_CH3_AD]
-    sr: byte[SID_CH3_SR]
+    freq: irq_safe[word[SID_CH3_FREQ]] = 0x2800
+    ctrl: byte[SID_CH3_CTRL] = 0x11
+    ad: byte[SID_CH3_AD] = 0x00
+    sr: byte[SID_CH3_SR] = 0x80
     # State (ZP) - irq_safe because sfx_tick reads these from IRQ
-    active: byte[ZP_SFX_ACTIVE]
-    timer: byte[ZP_SFX_TIMER]
-    curr_freq: irq_safe[word[ZP_SFX_FREQ]]
-    delta: sbyte[ZP_SFX_DELTA]
-    phase: byte[ZP_SFX_PHASE]
-    note_len: byte[ZP_SFX_NOTE_LEN]
-
-    curr_freq = 0x2800 # High pitch (same as levelup)
-    freq = curr_freq
-    ad = 0x00          # Instant attack/decay
-    sr = 0x80          # Medium sustain
-    ctrl = 0x11        # Triangle + gate - start first beep
-    delta = 0          # No pitch change
-    note_len = 4       # Each beep is 6 frames (~100ms)
-    timer = 2          # Two beeps total
-    phase = 0          # Frame counter starts at 0
-    active = 3         # Arpeggio mode with note_len
+    active: byte[ZP_SFX_ACTIVE] = 3
+    timer: byte[ZP_SFX_TIMER] = 2
+    curr_freq: irq_safe[word[ZP_SFX_FREQ]] = 0x2800
+    delta: sbyte[ZP_SFX_DELTA] = 0
+    phase: byte[ZP_SFX_PHASE] = 0
+    note_len: byte[ZP_SFX_NOTE_LEN] = 4       # Each beep is 6 frames (~100ms)
 
 
 @relocate(0xC140)
 def sfx_play_slide():
     """Slide sound - quick 'sutty' swoosh upward."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
-    freq: irq_safe[word[SID_CH3_FREQ]]
+    freq: irq_safe[word[SID_CH3_FREQ]] = 0x2000
     ctrl: byte[SID_CH3_CTRL]
-    ad: byte[SID_CH3_AD]
-    sr: byte[SID_CH3_SR]
+    ad: byte[SID_CH3_AD] = 0x00
+    sr: byte[SID_CH3_SR] = 0x50
     # State (ZP) - irq_safe because sfx_tick reads these from IRQ
-    active: byte[ZP_SFX_ACTIVE]
-    timer: byte[ZP_SFX_TIMER]
-    curr_freq: irq_safe[word[ZP_SFX_FREQ]]
-    delta: sbyte[ZP_SFX_DELTA]
-
-    curr_freq = 0x2000 # Higher start
-    freq = curr_freq
-    ad = 0x00          # Instant attack/decay
-    sr = 0x50          # Quick fade
-    ctrl = 0x81        # Noise + gate (swoosh texture)
-    delta = 12         # Strong upward sweep!
-    timer = 4          # Very quick
-    active = 1
+    active: byte[ZP_SFX_ACTIVE] = 1
+    timer: byte[ZP_SFX_TIMER] = 4
+    curr_freq: irq_safe[word[ZP_SFX_FREQ]] = 0x2000
+    delta: sbyte[ZP_SFX_DELTA] = 12
 
 
 @irq_helper
@@ -1312,15 +1265,6 @@ class Screen:
         # Bank 3 ($C000-$FFFF)
         self.cia2_pra = self.cia2_pra & 0xFC  # Bank 3 ($C000-$FFFF)
 
-    def scroll_play_area():
-        """Scroll Color RAM 2 chars left - caller handles raster sync and SEI/CLI!"""
-        offset: word
-        # Just the blkcpy - caller is responsible for:
-        # 1. Raster sync
-        # 2. SEI before, CLI after bullet_x adjustment
-        offset = row_offset_data[PLAY_TOP]
-        blkcpy(self.colors, offset + 2, self.colors, offset, 38, 20, 40)
-
     def print_at(x: byte, y: byte, text: alias[string], col: byte, bg: byte):
         """Print text with ECM background select (bg = BG_PLAY/BG_TITLE/BG_STATUS/BG_HIGHLIGHT)."""
         pos: word
@@ -1706,6 +1650,7 @@ class Game:
     score: word = INITIAL_SCORE
     level: byte = 1
     cols_cleared: word = 0  # Total columns cleared
+    active_col_count: byte = 0  # Number of columns with blocks (for slide sound)
 
     move_timer: word = 0
     last_jiffy: byte = 0      # Last jiffy_lo value for delta timing (60 Hz)
@@ -1783,16 +1728,14 @@ class Game:
             color = COLOR_BULLET
 
         # Draw 2x2 block with "next" characters (ECM background 2 = status bar)
-        Screen.screen[40 * 23 + 1] = CHAR_NEXT_TL + bg_color
-        Screen.screen[40 * 23 + 2] = CHAR_NEXT_TR + bg_color
-        Screen.screen[40 * 24 + 1] = CHAR_NEXT_BL + bg_color
-        Screen.screen[40 * 24 + 2] = CHAR_NEXT_BR + bg_color
-
-        # Set color for all 4 characters
-        Screen.colors[40 * 23 + 1] = color
+        Screen.screen[40 * 23 + 2] = CHAR_NEXT_TL + bg_color
         Screen.colors[40 * 23 + 2] = color
-        Screen.colors[40 * 24 + 1] = color
+        Screen.screen[40 * 23 + 3] = CHAR_NEXT_TR + bg_color
+        Screen.colors[40 * 23 + 3] = color
+        Screen.screen[40 * 24 + 2] = CHAR_NEXT_BL + bg_color
         Screen.colors[40 * 24 + 2] = color
+        Screen.screen[40 * 24 + 3] = CHAR_NEXT_BR + bg_color
+        Screen.colors[40 * 24 + 3] = color
 
     def determine_next_bullet():
         """Randomly determine the next bullet type."""
@@ -1997,12 +1940,15 @@ class Game:
                 return
 
     def update_col_num():
-        """Update the column number"""
+        """Update the column number and store active column count."""
         col: byte
         n: byte = 0
         for col in range(GRID_WIDTH, 0, -1):
             if self.grid.has_block(col - 1):
                 n += 1
+
+        # Store for slide sound decision
+        self.active_col_count = n
 
         # Play music if column number is greater than COLUMN_START_MUSIC
         if not self.music_enabled:
@@ -2200,9 +2146,20 @@ class Game:
             else:
                 # No more cascade opportunities - all done!
                 self.cascade_phase = CASCADE_IDLE
+                # Load next bullet into cannon (update bullet_type for next shot)
+                self.bullet_type_zp = self.next_bullet_type_zp
+                # Set sprite color to match the newly loaded bullet
+                if self.bullet_type_zp == BULLET_TYPE_YELLOW:
+                    Screen.sprite_color[1] = COLOR_BULLET_YELLOW
+                elif self.bullet_type_zp == BULLET_TYPE_BLUE:
+                    Screen.sprite_color[1] = COLOR_BULLET_BLUE
+                else:
+                    Screen.sprite_color[1] = COLOR_BULLET
                 # Re-enable bullet sprite now that all effects complete
                 self.sprite_en_zp = self.sprite_en_zp | 0x02
                 Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
+                # NOW determine next bullet type (indicator shows what comes AFTER loaded one)
+                self.determine_next_bullet()
                 # Check for complete columns that may have formed during cascade
                 # (bullet hit during cascade doesn't trigger check_complete_columns)
                 self.check_complete_columns()
@@ -2265,9 +2222,12 @@ class Game:
             if self.effect_phase > 7:
                 self.effect_phase = 0
 
-                # Remove the column (shifts left columns right)
-                self.grid.remove_complete_column(self.effect_col)
-                sfx_play_slide()  # Slide sound for the column shift
+                # Only shift columns if there are blocks to the left of the removed column
+                # Formula: if (GRID_WIDTH - effect_col) < active_col_count, there are blocks to the left
+                # This saves CPU time by skipping unnecessary blkcpy calls when nothing would move
+                if GRID_WIDTH - self.effect_col < self.active_col_count:
+                    self.grid.remove_complete_column(self.effect_col)
+                    sfx_play_slide()
 
                 # Update score (cascade clears give bonus points!)
                 # Formula: base_score + (level - 1) * level_bonus
@@ -2452,8 +2412,8 @@ class Game:
         self.update_status()
         self.update_col_num()
 
-        # Set current bullet type from "next" indicator, then determine next one
-        self.bullet_type_zp = self.next_bullet_type_zp
+        # NOTE: bullet_type_zp already contains the loaded bullet type!
+        # (Set during init or previous handle_bullet_hit)
 
         # Initialize yellow bullet state machine
         if self.bullet_type_zp == BULLET_TYPE_YELLOW:
@@ -2482,9 +2442,8 @@ class Game:
                 self.yellow_state_zp = YELLOW_STATE_AS_WHITE
             self.yellow_last_empty_zp = 0xFF  # Reset to invalid marker
 
-        # Determine next bullet type and update indicator
-        # (sprite color will be set in handle_bullet_hit when this bullet lands)
-        self.determine_next_bullet()
+        # NOTE: next bullet type is determined in handle_bullet_hit() when bullet lands
+        # This ensures the "Next" indicator shows what comes AFTER the loaded bullet
 
         # Switch cannon sprite to "fired" state (empty barrel)
         Screen.sprite_ptr[0] = CANNON_BLOCK_FIRED
@@ -2551,21 +2510,24 @@ class Game:
         self.bullet_hit_zp = 0
         hit_col = self.bullet_hit_col_zp
 
-        # Set sprite color for NEXT waiting bullet (before it becomes visible!)
-        if self.next_bullet_type_zp == BULLET_TYPE_YELLOW:
-            Screen.sprite_color[1] = COLOR_BULLET_YELLOW
-        elif self.next_bullet_type_zp == BULLET_TYPE_BLUE:
-            Screen.sprite_color[1] = COLOR_BULLET_BLUE
-        else:
-            Screen.sprite_color[1] = COLOR_BULLET
-
         # Hit column 0 means no block was placed
         if hit_col == 0:
             if self.effect_phase == 0:
                 Screen.sprite_ptr[0] = CANNON_BLOCK_READY
+                # Load next bullet into cannon (update bullet_type for next shot)
+                self.bullet_type_zp = self.next_bullet_type_zp
+                # Set sprite color to match the newly loaded bullet
+                if self.bullet_type_zp == BULLET_TYPE_YELLOW:
+                    Screen.sprite_color[1] = COLOR_BULLET_YELLOW
+                elif self.bullet_type_zp == BULLET_TYPE_BLUE:
+                    Screen.sprite_color[1] = COLOR_BULLET_BLUE
+                else:
+                    Screen.sprite_color[1] = COLOR_BULLET
                 # Re-enable bullet sprite (was hidden by IRQ on collision)
                 self.sprite_en_zp = self.sprite_en_zp | 0x02
                 Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
+                # NOW determine next bullet type (indicator shows what comes AFTER loaded one)
+                self.determine_next_bullet()
             return
 
         # Check for complete columns
@@ -2575,9 +2537,20 @@ class Game:
         # Restore cannon sprite only if no effect started
         if self.effect_phase == 0:
             Screen.sprite_ptr[0] = CANNON_BLOCK_READY
+            # Load next bullet into cannon (update bullet_type for next shot)
+            self.bullet_type_zp = self.next_bullet_type_zp
+            # Set sprite color to match the newly loaded bullet
+            if self.bullet_type_zp == BULLET_TYPE_YELLOW:
+                Screen.sprite_color[1] = COLOR_BULLET_YELLOW
+            elif self.bullet_type_zp == BULLET_TYPE_BLUE:
+                Screen.sprite_color[1] = COLOR_BULLET_BLUE
+            else:
+                Screen.sprite_color[1] = COLOR_BULLET
             # Re-enable bullet sprite (was hidden by IRQ on collision)
             self.sprite_en_zp = self.sprite_en_zp | 0x02
             Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
+            # NOW determine next bullet type (indicator shows what comes AFTER loaded one)
+            self.determine_next_bullet()
 
     def do_scroll():
         """Move grid left using blkcpy and draw new column."""
@@ -2635,7 +2608,7 @@ class Game:
         __sei__()  # Disable IRQ for entire atomic sequence
 
         # 1. Scroll play area left
-        Screen.scroll_play_area()
+        blkcpy(Screen.colors, 82, Screen.colors, 80, 38, 20, 40)
 
         # 2. Spawn new column directly to Color RAM
         self.grid.spawn_column()
@@ -2858,13 +2831,15 @@ class Game:
 
         # Initialize bullet types - first bullet is ALWAYS white for consistency
         self.bullet_type_zp = BULLET_TYPE_WHITE
-        self.next_bullet_type_zp = BULLET_TYPE_WHITE  # First shown in "Next" is also white
+        self.next_bullet_type_zp = BULLET_TYPE_WHITE  # First loaded in cannon is white
         # Sprite color will be set to white by init_sprites() below
 
         # Draw title screen
         self.draw_title()
-        # Draw status bar (includes "Next" indicator)
+        # Draw status bar
         self.draw_status()
+        # Determine what comes AFTER the first white bullet (shown in "Next" indicator)
+        self.determine_next_bullet()
 
         # Initialize sprites
         self.init_sprites()
@@ -2873,14 +2848,13 @@ class Game:
         __set_irq__(irq_handler)
         __enable_raster_irq__(IRQ_RASTER_BOTTOM)
 
-
         # Initialize column pool (pre-generate random patterns)
         self.grid.init_pool()
 
         # Spawn initial columns to start with a populated grid
         # NOTE: scroll first, then spawn - so the last column stays at col 19
         for _ in range(INITIAL_COLUMNS):
-            Screen.scroll_play_area()
+            blkcpy(Screen.colors, 82, Screen.colors, 80, 38, 20, 40)
             self.grid.spawn_column()
 
         # Wait for music to stop
@@ -2938,7 +2912,10 @@ class TitleScreen:
     menu_color: array[byte, 160][COLOR + 840]
 
     # Menu state
-    menu_selected: byte = 0
+    menu_selected: byte[ZP_MENU_SELECTED]
+
+    # Backup for neon flash - reuse game's column buffer area
+    screen_backup: array[byte, 24][COLUMN_BUFFER_ADDR]
 
     def decompress_image():
         """Decompress RLE image data to VIC memory."""
@@ -2971,6 +2948,28 @@ class TitleScreen:
             for j in range(13, 26):
                 self.colorram[pos + j] = color
 
+    def flash_darken():
+        """Save screen RAM and darken white to light grey."""
+        col: byte
+        idx: word = 3 * 40 + 8
+        val: byte
+        for col in range(24):
+            val = self.screen_data[idx]
+            self.screen_backup[col] = val
+            if (val >> 4) == WHITE:
+                self.screen_data[idx] = (val & 0x0F) | (LIGHT_GREY << 4)
+            if (val & 0x0F) == WHITE:
+                self.screen_data[idx] = (self.screen_data[idx] & 0xF0) | LIGHT_GREY
+            idx += 1
+
+    def flash_restore():
+        """Restore screen RAM from backup."""
+        col: byte
+        idx: word = 3 * 40 + 8
+        for col in range(24):
+            self.screen_data[idx] = self.screen_backup[col]
+            idx += 1
+
     def cleanup():
         """Clean up title screen resources (IRQ, sprites, etc.)."""
         cia1_icr: byte[CIA1_ICR]
@@ -2987,33 +2986,80 @@ class TitleScreen:
         __set_irq__(irq_screen_handler)
         cia1_icr = 0x81
 
-
-    def wait_menu() -> byte:
+    def wait_menu():
         # Display title screen, return selection: 0=Play, 2=Story, 3=Credits
         key: byte
+        frame_counter: byte = 0
+        flash_delay: byte = 190
+        flash_count: byte = 0
+        is_dark: byte = 0
+        shimmer: byte = 60        # >= 14: timer (counting down), < 14: active position
+        base: word
 
         # Draw menu
         self.draw_menu()
         self.update_menu_highlight()
 
-        # Menu loop - wait for selection
+        # Menu loop
         while True:
-            # Check keyboard and joystick
+            Screen.sync_raster(250)
+
+            # Neon flash on title
+            frame_counter += 1
+            if frame_counter >= flash_delay:
+                frame_counter = 0
+                if flash_count == 0:
+                    flash_count = 3 + Random.range_mask(3)
+                    self.flash_darken()
+                    is_dark = 1
+                    flash_delay = 5
+                elif is_dark:
+                    self.flash_restore()
+                    is_dark = 0
+                    flash_count -= 1
+                    if flash_count > 0:
+                        flash_delay = 5
+                    else:
+                        flash_delay = 190 + Random.range_mask(63)
+                else:
+                    self.flash_darken()
+                    is_dark = 1
+                    flash_delay = 2
+
+            # Shimmer on selected menu item (every 2nd frame = slower)
+            base = row_offset_data[self.menu_selected + MENU_ROW_START] + 13
+            if shimmer > 26:
+                shimmer -= 1
+            elif shimmer == 26:
+                shimmer = 0
+            elif shimmer < 26:
+                if (shimmer & 1) == 0:
+                    if shimmer > 0:
+                        self.colorram[base + (shimmer >> 1) - 1] = COLOR_MENU_SELECTED
+                    if shimmer < 26:
+                        self.colorram[base + (shimmer >> 1)] = WHITE
+                shimmer += 1
+                if shimmer == 26:
+                    self.colorram[base + 12] = COLOR_MENU_SELECTED
+                    shimmer = 90 + Random.range_mask(127)
+
+            # Keyboard/joystick
             key = getkey()
             if key == KEY_UP or key == KEY_W or key == KEY_W_LOWER:
                 if self.menu_selected > 0:
                     self.menu_selected -= 1
                     self.update_menu_highlight()
+                    shimmer = 60 + Random.range_mask(63)
 
             elif key == KEY_DOWN or key == KEY_S or key == KEY_S_LOWER:
                 if self.menu_selected < MENU_ITEM_COUNT - 1:
                     self.menu_selected += 1
                     self.update_menu_highlight()
+                    shimmer = 60 + Random.range_mask(63)
 
-            # SPACE or RETURN
             elif key == KEY_SPACE or key == KEY_RETURN:
                 self.cleanup()
-                return self.menu_selected
+                break
 
     def __init__():
         # Initialize screen
@@ -3060,9 +3106,6 @@ class StoryScreen:
         Screen.print_center(21, "EVACUATION IN PROGRESS", YELLOW, 0)
         Screen.print_center(22, "13337 LIVES AT STAKE", YELLOW, 0)
 
-    def loop():
-        press_a_key(14, 24)
-
     def __init__():
         Screen.sync_raster(250)
         # Set game mode (ECM text mode)
@@ -3070,7 +3113,7 @@ class StoryScreen:
         # Draw story content
         self.draw()
         # Wait for keypress
-        self.loop()
+        press_a_key(14, 24)
 
 
 class AboutScreen:
@@ -3102,9 +3145,6 @@ class AboutScreen:
         Screen.print_center(21, "ARROWS / WASD / JOYSTICK 2", LIGHT_GREY, 0)
         Screen.print_center(22, "SPACE / FIRE", LIGHT_GREY, 0)
 
-    def loop():
-        press_a_key(14, 24)
-
     def __init__():
         Screen.sync_raster(250)
         # Set game mode (ECM text mode)
@@ -3112,7 +3152,7 @@ class AboutScreen:
         # Draw about content
         self.draw()
         # Wait for keypress
-        self.loop()
+        press_a_key(14, 24)
 
 
 class DonateScreen:
@@ -3165,10 +3205,6 @@ class DonateScreen:
         # Thank you
         Screen.print_at(2, 16, "THANK YOU", GREEN, 0)
 
-    def loop():
-        """Wait for keypress with blinking prompt."""
-        press_a_key(0, 22)
-
     def __init__():
         Screen.sync_raster(250)
         Screen.set_game_mode()
@@ -3176,7 +3212,7 @@ class DonateScreen:
         self.draw_qr()
         self.draw()
         # Wait for keypress
-        self.loop()
+        press_a_key(1, 22)
 
 
 # =============================================================================
@@ -3186,10 +3222,10 @@ class DonateScreen:
 # =============================================================================
 
 @relocate(0xC140)
-def title_screen() -> byte:
+def title_screen():
     title_screen: TitleScreen
     title_screen()
-    return title_screen.wait_menu()
+    title_screen.wait_menu()
 
 
 @relocate(0x200)
@@ -3223,7 +3259,7 @@ def game():
 @noreturn
 def main():
     # Menu selection: 0=Play, 2=Story, 3=Credits
-    menu_choice: byte = 0
+    menu_choice: byte[ZP_MENU_SELECTED] = 0
 
     # Initialize sprite data in VIC bank
     Sprites()
@@ -3236,7 +3272,7 @@ def main():
 
     while True:
         # InitializeShow title screen and get menu selection
-        menu_choice = title_screen()
+        title_screen()
 
         if menu_choice == 0:
             # Stop music
