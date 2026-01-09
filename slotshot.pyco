@@ -64,6 +64,8 @@ MAX_HOLES_MASK = 3            # Bitmask for holes (0-3, then +1 = 1-4)
 RANDOM_STATE_ADDR = 0xFD       # $FD-$FE for 16-bit state
 RANDOM_COUNTER_ADDR = 0xFB     # $FB for counter (extra randomness)
 
+KERNAL_RPTFLG = 0x028A  # $00=default (CRSR/SPACE only), $80=all keys, $40=none
+
 # =============================================================================
 # VIC REGISTERS
 # =============================================================================
@@ -460,16 +462,16 @@ commodore_rainbow_data: tuple[byte] = (
 
 # QR code for donate screen - bitstream (79 bytes, 625 bits continuous)
 # Bit=1 -> black ($20), Bit=0 -> white ($60)
-# URL: https://bit.ly/3LrekCv (PayPal donate link)
+# URL: https://bit.ly/slotshot
 qr_donate_data: tuple[byte] = (
-    0xFE, 0x7C, 0x3F, 0xC1, 0x6E, 0x10, 0x6E, 0xAA, 0x6B, 0xB7,
-    0x5F, 0xB5, 0xDB, 0xA0, 0x9A, 0xEC, 0x10, 0xD5, 0x07, 0xFA,
-    0xAA, 0xFE, 0x01, 0xC6, 0x00, 0x82, 0xD7, 0xE7, 0x4C, 0x87,
-    0xCF, 0x9C, 0xC5, 0x63, 0x6B, 0x3C, 0x7C, 0x93, 0x3B, 0x4B,
-    0x0C, 0x08, 0x4A, 0x8A, 0xD9, 0x97, 0xF7, 0x38, 0xD1, 0x6D,
-    0xBB, 0xAE, 0xFA, 0x00, 0x71, 0xC4, 0x3F, 0x92, 0x2A, 0x30,
-    0x42, 0x31, 0x0B, 0xA5, 0x1F, 0xBD, 0xD2, 0x75, 0x0E, 0xE9,
-    0x9A, 0x1B, 0x04, 0x19, 0xB1, 0xFE, 0x9C, 0xC4, 0x80
+    0xFE, 0x64, 0xBF, 0xC1, 0x37, 0x90, 0x6E, 0xBC, 0xEB, 0xB7,
+    0x5C, 0xC5, 0xDB, 0xA8, 0x2A, 0xEC, 0x14, 0x1D, 0x07, 0xFA,
+    0xAA, 0xFE, 0x01, 0xF0, 0x00, 0xBE, 0x37, 0xBE, 0x36, 0xBD,
+    0x48, 0xAE, 0xD5, 0x63, 0x77, 0x33, 0x5C, 0x1B, 0x64, 0xE6,
+    0xBC, 0x8D, 0x22, 0xAA, 0xED, 0xE7, 0xF7, 0x0A, 0xE2, 0x71,
+    0x9E, 0xF6, 0xFA, 0x00, 0x56, 0x46, 0x3F, 0x91, 0xAA, 0xF0,
+    0x59, 0x51, 0xAB, 0xAE, 0xFF, 0xBD, 0xD6, 0x19, 0x7E, 0xEA,
+    0x6A, 0x1B, 0x04, 0x23, 0xB9, 0xFE, 0x98, 0x1F, 0x80
 )
 
 # Level system
@@ -554,8 +556,20 @@ title_row0_data: tuple[byte] = (27, 29, 31, 35, 27, 37, 31, 35)
 title_row1_data: tuple[byte] = (28, 30, 34, 36, 28, 38, 34, 36)
 
 # Star positions (x, y pairs for sprites)
-title_star_positions_data: tuple[word] = (57, 243, 99, 219, 259, 219, 271, 249, 311, 231)
-game_star_positions_data: tuple[word] = (57, 95, 98, 189, 175, 142, 261, 201, 283, 102)
+title_star_positions_data: tuple[word] = (
+    57, 243,
+    99, 219,
+    249, 213,
+    271, 249,
+    311, 231
+)
+game_star_positions_data: tuple[word] = (
+    57, 95,
+    98, 189,
+    175, 142,
+    261, 201,
+    283, 102
+)
 game_star_color_positions_data: tuple[word] = (204, 689, 459, 749, 272)
 
 bitmap_rle: tuple[byte] = SLOTSHOT_BITMAP_RLE
@@ -1289,25 +1303,6 @@ class Screen:
         self.cia2_pra = self.cia2_pra & 0xFC  # Bank 3 ($C000-$FFFF)
         __cli__()
 
-    def set_text_mode():
-        """Configure VIC for standard text mode (no ECM) - for screens with graphics chars."""
-        # Set background and border colors
-        self.background = COLOR_SCREEN_BG
-        self.border = COLOR_SCREEN_BG
-        # Clear screen
-        memfill(self.screen, 32)
-        memfill(self.colors, BLACK)
-        __sei__()
-        # Configure VIC for standard text mode
-        self.vic_memptr = GAME_MEMPTR
-        # ECM OFF, DEN ON, Bitmap OFF, preserve raster MSB (bit 7 masked)
-        self.vic_ctrl1 = (self.vic_ctrl1 & 0x9F) | VIC_DEN
-        # Multicolor OFF
-        self.vic_ctrl2 = self.vic_ctrl2 & (0xFF ^ TITLE_VIC_MULTICOLOR)
-        # Bank 3 ($C000-$FFFF)
-        self.cia2_pra = self.cia2_pra & 0xFC
-        __cli__()
-
     def set_bitmap_mode():
         """Configure VIC for multicolor bitmap mode (title screen)."""
         # Set background and border colors
@@ -1769,6 +1764,9 @@ class Game:
     yellow_state_zp: byte[ZP_YELLOW_STATE]
     yellow_last_empty_zp: byte[ZP_YELLOW_LAST_EMPTY]
 
+    # Enable key repeat for all keys
+    rptflg: byte[KERNAL_RPTFLG] = 0x80
+
     def draw_next_indicator():
         """Draw the 2x2 'Next' indicator block at columns 0-1, rows 23-24."""
         next_type: byte[ZP_NEXT_BULLET_TYPE]
@@ -1836,6 +1834,7 @@ class Game:
         score_color: byte
         label_color: byte
         display_value: word
+        best: bool = False
 
         Screen.print_number(14, 23, self.cols_cleared, 5, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
         if self.level_flash == 0:
@@ -1843,7 +1842,7 @@ class Game:
 
         # Show "H-" prefix and high score, or current score
         if self.showing_high_score and HighScore.value > 0:
-            Screen.print_at(6, 24, "H-", COLOR_HIGH_SCORE_LABEL, BG_STATUS)
+            Screen.print_at(5, 24, " H-", COLOR_HIGH_SCORE_LABEL, BG_STATUS)
             display_value = HighScore.value
             label_color = COLOR_HIGH_SCORE_LABEL
             score_color = COLOR_HIGH_SCORE
@@ -1857,11 +1856,13 @@ class Game:
                 if not self.high_score_beaten:
                     self.high_score_beaten = True
                     sfx_play_bibip()
-                Screen.print_at(6, 24, "B-", COLOR_STATUS_TEXT, BG_STATUS)
+                Screen.print_at(5, 24, "NEW BEST", COLOR_STATUS_TEXT, BG_STATUS)
+                best = True
             else:
                 Screen.print_at(6, 24, "  ", COLOR_STATUS_TEXT, BG_STATUS)
 
-        Screen.print_at(8, 24, "SCORE:", label_color, BG_STATUS)
+        if not best:
+            Screen.print_at(8, 24, "SCORE:", label_color, BG_STATUS)
         Screen.print_number(14, 24, display_value, 5, score_color, BG_STATUS)
 
     def update_score_display():
@@ -1875,15 +1876,17 @@ class Game:
     def update_level_flash():
         """Animate level number flashing on level-up (inverse effect)."""
         phase: byte
+        color: byte
         if self.level_flash == 0:
             return
         # Slow down: only update every 8 frames (level_flash counts 80→0)
         phase = self.level_flash / 8  # 0-9 → 5 full cycles
         # Odd phase = inverse (white bg + dark text), even = normal
         if phase & 1:
-            Screen.print_number(26, 23, word(self.level), 2, DARK_GREY, BG_HIGHLIGHT)
+            color = DARK_GREY
         else:
-            Screen.print_number(26, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+            color = COLOR_STATUS_TEXT_HIGHLIGHT
+        Screen.print_number(26, 23, word(self.level), 2, color, BG_STATUS)
         self.level_flash -= 1
 
     def update_time():
@@ -2514,7 +2517,7 @@ class Game:
         key = getkey()
 
         # P toggles pause (works even while paused!)
-        if key == KEY_P or key == KEY_P_LOWER:
+        if key == KEY_P or key == KEY_P_LOWER or (key == KEY_SPACE and self.paused):
             if self.paused:
                 self.paused = False
                 self.draw_pause()
@@ -2523,6 +2526,9 @@ class Game:
                 self.paused = True
                 self.draw_pause()
             return
+
+        if key == KEY_Q or key == KEY_Q_LOWER:
+            self.running = False
 
         # Other keys only work when NOT paused
         if self.paused:
@@ -2534,8 +2540,6 @@ class Game:
             self.cannon_move_down()
         elif key == KEY_SPACE:
             self.fire_bullet()
-        elif key == KEY_Q or key == KEY_Q_LOWER:
-            self.running = False
 
     def handle_bullet_hit():
         """Handle bullet hit - IRQ places blocks, we just do housekeeping."""
@@ -2769,7 +2773,9 @@ class Game:
         x: byte
         y: byte
         pos: word
-        pak_color: byte = LIGHT_BLUE
+        pak_color: byte
+        pak_visible: bool = False
+        pak_y: byte
 
         for y in range(8, 16):
             pos = row_offset_data[y]
@@ -2777,26 +2783,32 @@ class Game:
                 Screen.screen[pos + x] = CHAR_SPACE + BG_STATUS
                 Screen.colors[pos + x] = WHITE  # This hides stars in front of window
 
-        Screen.print_at(15, 10, "GAME OVER!", WHITE, BG_STATUS)
-
         # Show "NEW HIGHSCORE!" if player beat the high score
-        if HighScore.is_beaten(self.score):
-            Screen.print_at(13, 12, "NEW HIGHSCORE!", YELLOW, BG_STATUS)
+        if self.high_score_beaten:
+            Screen.print_center(10, "CONGRATULATIONS", WHITE, BG_STATUS)
+            Screen.print_center(12, "NEW HIGHSCORE!", LIGHT_RED, BG_STATUS)
+            pak_y = 14
+        else:
+            Screen.print_center(10, "GAME OVER!", WHITE, BG_STATUS)
+            pak_y = 12
 
+        # Clear key buffer
         while getkey() != 0:
             pass
+
+        # Press A Key prompt
         while True:
+            if pak_visible:
+                pak_color = DARK_GREY
+                pak_visible = False
+            else:
+                pak_color = YELLOW
+                pak_visible = True
+            Screen.print_center(pak_y, "PRESS A KEY!", pak_color, BG_STATUS)
             for _ in range(10):
                 Screen.wait_frames(2)
                 if getkey() != 0:
                     return
-            if pak_color == YELLOW:
-                # Hide prompt
-                pak_color = DARK_GREY
-            else:
-                # Show prompt
-                pak_color = YELLOW
-            Screen.print_center(13, "PRESS A KEY!", pak_color, BG_STATUS)
 
     def loop():
         # Main game loop
@@ -2810,12 +2822,14 @@ class Game:
             HighScore.update(self.score)
             music_stop_fade(25)
 
-            # Border flash animation (red flashing like maze.pyco win animation)
+            # Border and status bar flash animation (red flashing)
             for _ in range(5):
                 Screen.wait_frames(1)
                 Screen.border = COLOR_GAME_OVER_FLASH
+                Screen.bg2 = COLOR_GAME_OVER_FLASH
                 Screen.wait_frames(8)
                 Screen.border = COLOR_SCREEN_BORDER
+                Screen.bg2 = COLOR_STATUS_BG
                 Screen.wait_frames(8)
 
             # Play game over music
@@ -3034,12 +3048,12 @@ class StoryScreen:
 
         # Solution
         Screen.print_center(13, "THE RESEARCH COUNCIL FOUND ONE", LIGHT_GREY, 0)
-        Screen.print_center(14, "WEAKNESS. WHITE MATTER", LIGHT_GREY, 0)
-        Screen.print_center(15, "NEUTRALIZES ENTIRE COLUMNS.", LIGHT_GREY, 0)
+        Screen.print_center(14, "WEAKNESS. VACCINES THROUGH GAPS", LIGHT_GREY, 0)
+        Screen.print_center(15, "NEUTRALIZE ENTIRE COLUMNS.", LIGHT_GREY, 0)
 
-        # Constraint
-        Screen.print_center(17, "BUT THE VACCINE IS UNSTABLE.", LIGHT_GREY, 0)
-        Screen.print_center(18, "IT DECAYS WITHIN SECONDS.", LIGHT_GREY, 0)
+        # Vaccine types
+        Screen.print_center(17, "WHITE FADES. YELLOW DRILLS. BLUE STAYS.", LIGHT_GREY, 0)
+        Screen.print_center(18, "USE WHAT YOU GET.", LIGHT_GREY, 0)
         Screen.print_center(19, "AIM FAST. SHOOT TRUE.", WHITE, 0)
 
         # Stakes
@@ -3153,7 +3167,7 @@ class DonateScreen:
 
     def loop():
         """Wait for keypress with blinking prompt."""
-        press_a_key(1, 23)
+        press_a_key(0, 22)
 
     def __init__():
         Screen.sync_raster(250)
@@ -3227,20 +3241,17 @@ def main():
         if menu_choice == 0:
             # Stop music
             music_stop_fade(15)
-            # PLAY GAME selected
+            # Start game
             game()
             # Continue music
             slotshot_music_vic_init()
 
         elif menu_choice == 1:
-            # STORY selected - TODO: show story screen
             story_screen()
 
         elif menu_choice == 2:
-            # ABOUT selected
             about_screen()
 
         elif menu_choice == 3:
-            # DONATE selected
             donate_screen()
 
