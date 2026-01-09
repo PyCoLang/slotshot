@@ -272,11 +272,6 @@ COLOR_BULLET_BLUE = BLUE
 YELLOW_CHANCE_THRESHOLD = 15
 BLUE_CHANCE_THRESHOLD = 60
 
-# Bullet types
-BULLET_TYPE_WHITE = 0
-BULLET_TYPE_YELLOW = 1
-BULLET_TYPE_BLUE = 2
-
 # Yellow bullet states (3-state machine):
 # State 0: Looking for first WALL (passes through empty space before first wall)
 # State 1: IN WALL - passing through wall blocks, looking for empty space after wall
@@ -906,7 +901,7 @@ def irq_handler(vic: byte, cia1: byte):
                 # Edge reached - place block based on bullet type and state
                 bullet_hit_col = GRID_WIDTH
 
-                if bullet_type == BULLET_TYPE_YELLOW:
+                if bullet_type == COLOR_BULLET_YELLOW:
                     # Yellow bullet: check state for placement
                     if yellow_state == YELLOW_STATE_AS_WHITE:
                         # AS_WHITE: no gap exists, place at edge (like white)
@@ -917,23 +912,14 @@ def irq_handler(vic: byte, cia1: byte):
                     else:
                         # No empty found (0xFF) - place at edge
                         pos = row_offset_data[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
-                    color_ram[pos] = YELLOW
-                    color_ram[pos + 1] = YELLOW
-                    color_ram[pos + 40] = YELLOW
-                    color_ram[pos + 41] = YELLOW
                 else:
                     # White/Blue bullet: always place at edge
                     pos = row_offset_data[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
-                    if bullet_type == BULLET_TYPE_WHITE:
-                        color_ram[pos] = WHITE
-                        color_ram[pos + 1] = WHITE
-                        color_ram[pos + 40] = WHITE
-                        color_ram[pos + 41] = WHITE
-                    else:
-                        color_ram[pos] = BLUE
-                        color_ram[pos + 1] = BLUE
-                        color_ram[pos + 40] = BLUE
-                        color_ram[pos + 41] = BLUE
+                # Place block with bullet's color (bullet_type IS the color!)
+                color_ram[pos] = bullet_type
+                color_ram[pos + 1] = bullet_type
+                color_ram[pos + 40] = bullet_type
+                color_ram[pos + 41] = bullet_type
             else:
                 # Check block collision at NEXT position (sprite right edge = +16)
                 screen_x = (next_x + 16 - SPRITE_X_OFFSET) / 8
@@ -949,7 +935,7 @@ def irq_handler(vic: byte, cia1: byte):
 
                     # === STOP AT WALL: WHITE, BLUE, or YELLOW-AS-WHITE ===
                     # All three behave the same: stop at first wall, place block before it
-                    if bullet_type != BULLET_TYPE_YELLOW or yellow_state == YELLOW_STATE_AS_WHITE:
+                    if bullet_type != COLOR_BULLET_YELLOW or yellow_state == YELLOW_STATE_AS_WHITE:
                         if color != BLACK:
                             # Block hit! Stop here
                             bullet_hit = 1
@@ -961,22 +947,12 @@ def irq_handler(vic: byte, cia1: byte):
                             sprite_enable = sprite_en | star_mask
 
                             if grid_col > 0:
+                                # Place block with bullet's color (bullet_type IS the color!)
                                 pos = row_offset_data[screen_y] + word(grid_col - 1) * BLOCK_WIDTH
-                                if bullet_type == BULLET_TYPE_WHITE:
-                                    color_ram[pos] = WHITE
-                                    color_ram[pos + 1] = WHITE
-                                    color_ram[pos + 40] = WHITE
-                                    color_ram[pos + 41] = WHITE
-                                elif bullet_type == BULLET_TYPE_BLUE:
-                                    color_ram[pos] = COLOR_BULLET_BLUE
-                                    color_ram[pos + 1] = COLOR_BULLET_BLUE
-                                    color_ram[pos + 40] = COLOR_BULLET_BLUE
-                                    color_ram[pos + 41] = COLOR_BULLET_BLUE
-                                else:
-                                    color_ram[pos] = YELLOW
-                                    color_ram[pos + 1] = YELLOW
-                                    color_ram[pos + 40] = YELLOW
-                                    color_ram[pos + 41] = YELLOW
+                                color_ram[pos] = bullet_type
+                                color_ram[pos + 1] = bullet_type
+                                color_ram[pos + 40] = bullet_type
+                                color_ram[pos + 41] = bullet_type
 
                     # === YELLOW BULLET: State machine (BEFORE_WALL, IN_WALL, IN_EMPTY) ===
                     elif yellow_state == YELLOW_STATE_BEFORE_WALL:
@@ -1004,13 +980,13 @@ def irq_handler(vic: byte, cia1: byte):
                             sprite_en = sprite_en & 0xFD
                             sprite_enable = sprite_en | star_mask
 
-                            # Place block at last empty position
+                            # Place block at last empty position (bullet_type IS the color!)
                             if yellow_last_empty < GRID_WIDTH:
                                 pos = row_offset_data[screen_y] + word(yellow_last_empty) * BLOCK_WIDTH
-                                color_ram[pos] = YELLOW
-                                color_ram[pos + 1] = YELLOW
-                                color_ram[pos + 40] = YELLOW
-                                color_ram[pos + 41] = YELLOW
+                                color_ram[pos] = bullet_type
+                                color_ram[pos + 1] = bullet_type
+                                color_ram[pos + 40] = bullet_type
+                                color_ram[pos + 41] = bullet_type
                         else:
                             # Still in gap - update last empty position
                             yellow_last_empty = grid_col
@@ -1715,40 +1691,35 @@ class Game:
     def draw_next_indicator():
         """Draw the 2x2 'Next' indicator block at columns 0-1, rows 23-24."""
         next_type: byte[ZP_NEXT_BULLET_TYPE]
-        color: byte
         bg_color: byte = BG_STATUS
 
-        # Determine color based on next bullet type
-        if next_type == BULLET_TYPE_YELLOW:
-            color = COLOR_BULLET_YELLOW
-        elif next_type == BULLET_TYPE_BLUE:
-            color = COLOR_BULLET_BLUE
+        # Special background highlight for blue bullet
+        if next_type == COLOR_BULLET_BLUE:
             bg_color = BG_HIGHLIGHT
-        else:
-            color = COLOR_BULLET
 
         # Draw 2x2 block with "next" characters (ECM background 2 = status bar)
+        # next_type IS the color - no conversion needed!
         Screen.screen[40 * 23 + 2] = CHAR_NEXT_TL + bg_color
-        Screen.colors[40 * 23 + 2] = color
+        Screen.colors[40 * 23 + 2] = next_type
         Screen.screen[40 * 23 + 3] = CHAR_NEXT_TR + bg_color
-        Screen.colors[40 * 23 + 3] = color
+        Screen.colors[40 * 23 + 3] = next_type
         Screen.screen[40 * 24 + 2] = CHAR_NEXT_BL + bg_color
-        Screen.colors[40 * 24 + 2] = color
+        Screen.colors[40 * 24 + 2] = next_type
         Screen.screen[40 * 24 + 3] = CHAR_NEXT_BR + bg_color
-        Screen.colors[40 * 24 + 3] = color
+        Screen.colors[40 * 24 + 3] = next_type
 
     def determine_next_bullet():
-        """Randomly determine the next bullet type."""
+        """Randomly determine the next bullet type (which IS the color!)."""
         next_type: byte[ZP_NEXT_BULLET_TYPE]
         rnd: byte
 
         rnd = Random.next()
         if rnd < YELLOW_CHANCE_THRESHOLD:
-            next_type = BULLET_TYPE_YELLOW
+            next_type = COLOR_BULLET_YELLOW
         elif rnd < BLUE_CHANCE_THRESHOLD:
-            next_type = BULLET_TYPE_BLUE
+            next_type = COLOR_BULLET_BLUE
         else:
-            next_type = BULLET_TYPE_WHITE
+            next_type = COLOR_BULLET
 
         self.draw_next_indicator()
 
@@ -1779,13 +1750,13 @@ class Game:
         display_value: word
         best: bool = False
 
-        Screen.print_number(14, 23, self.cols_cleared, 5, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(15, 23, self.cols_cleared, 5, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
         if self.level_flash == 0:
-            Screen.print_number(26, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+            Screen.print_number(27, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
 
         # Show "H-" prefix and high score, or current score
         if self.showing_high_score and HighScore.value > 0:
-            Screen.print_at(5, 24, " H-", COLOR_HIGH_SCORE_LABEL, BG_STATUS)
+            Screen.print_at(6, 24, " H-", COLOR_HIGH_SCORE_LABEL, BG_STATUS)
             display_value = HighScore.value
             label_color = COLOR_HIGH_SCORE_LABEL
             score_color = COLOR_HIGH_SCORE
@@ -1799,14 +1770,14 @@ class Game:
                 if not self.high_score_beaten:
                     self.high_score_beaten = True
                     sfx_play_bibip()
-                Screen.print_at(5, 24, "NEW BEST", COLOR_STATUS_TEXT, BG_STATUS)
+                Screen.print_at(6, 24, "NEW BEST", COLOR_STATUS_TEXT, BG_STATUS)
                 best = True
             else:
-                Screen.print_at(6, 24, "  ", COLOR_STATUS_TEXT, BG_STATUS)
+                Screen.print_at(7, 24, "  ", COLOR_STATUS_TEXT, BG_STATUS)
 
         if not best:
-            Screen.print_at(8, 24, "SCORE:", label_color, BG_STATUS)
-        Screen.print_number(14, 24, display_value, 5, score_color, BG_STATUS)
+            Screen.print_at(9, 24, "SCORE:", label_color, BG_STATUS)
+        Screen.print_number(17, 24, display_value, 5, score_color, BG_STATUS)
 
     def update_score_display():
         """Handle alternating score/high score display (call every frame)."""
@@ -1829,7 +1800,7 @@ class Game:
             color = DARK_GREY
         else:
             color = COLOR_STATUS_TEXT_HIGHLIGHT
-        Screen.print_number(26, 23, word(self.level), 2, color, BG_STATUS)
+        Screen.print_number(27, 23, word(self.level), 2, color, BG_STATUS)
         self.level_flash -= 1
 
     def update_time():
@@ -1842,8 +1813,8 @@ class Game:
         minutes = game_seconds / 60
         secs = game_seconds % 60
 
-        Screen.print_number(26, 24, minutes, 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
-        Screen.print_number(29, 24, secs, 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(27, 24, minutes, 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_number(30, 24, secs, 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
 
     def draw_pause():
         """Highlight PAUSE text in status bar."""
@@ -1867,11 +1838,11 @@ class Game:
         pos: word
         screen_status: array[byte, 80][SCREEN + 40 * 23] = [CHAR_SPACE + BG_STATUS]
 
-        Screen.print_at(8, 24, "SCORE:", COLOR_STATUS_TEXT, BG_STATUS)
-        Screen.print_at(6, 23, "CLEARED:", COLOR_STATUS_TEXT, BG_STATUS)
-        Screen.print_at(20, 23, "LEVEL:", COLOR_STATUS_TEXT, BG_STATUS)
-        Screen.print_at(21, 24, "TIME:", COLOR_STATUS_TEXT, BG_STATUS)
-        Screen.print_at(28, 24, ":", COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
+        Screen.print_at(7, 23, "CLEARED:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(9, 24, "SCORE:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(21, 23, "LEVEL:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(22, 24, "TIME:", COLOR_STATUS_TEXT, BG_STATUS)
+        Screen.print_at(29, 24, ":", COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
 
         # Draw "Next" indicator (2x2 block at columns 0-1, rows 23-24)
         self.draw_next_indicator()
@@ -2146,15 +2117,9 @@ class Game:
             else:
                 # No more cascade opportunities - all done!
                 self.cascade_phase = CASCADE_IDLE
-                # Load next bullet into cannon (update bullet_type for next shot)
+                # Load next bullet into cannon (bullet_type IS the color!)
                 self.bullet_type_zp = self.next_bullet_type_zp
-                # Set sprite color to match the newly loaded bullet
-                if self.bullet_type_zp == BULLET_TYPE_YELLOW:
-                    Screen.sprite_color[1] = COLOR_BULLET_YELLOW
-                elif self.bullet_type_zp == BULLET_TYPE_BLUE:
-                    Screen.sprite_color[1] = COLOR_BULLET_BLUE
-                else:
-                    Screen.sprite_color[1] = COLOR_BULLET
+                Screen.sprite_color[1] = self.bullet_type_zp
                 # Re-enable bullet sprite now that all effects complete
                 self.sprite_en_zp = self.sprite_en_zp | 0x02
                 Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
@@ -2416,7 +2381,7 @@ class Game:
         # (Set during init or previous handle_bullet_hit)
 
         # Initialize yellow bullet state machine
-        if self.bullet_type_zp == BULLET_TYPE_YELLOW:
+        if self.bullet_type_zp == COLOR_BULLET_YELLOW:
             # Pre-scan the row to check if there's a gap (wall followed by empty)
             screen_y = PLAY_TOP + self.cannon_row_zp * BLOCK_HEIGHT
             found_wall = 0
@@ -2514,15 +2479,9 @@ class Game:
         if hit_col == 0:
             if self.effect_phase == 0:
                 Screen.sprite_ptr[0] = CANNON_BLOCK_READY
-                # Load next bullet into cannon (update bullet_type for next shot)
+                # Load next bullet into cannon (bullet_type IS the color!)
                 self.bullet_type_zp = self.next_bullet_type_zp
-                # Set sprite color to match the newly loaded bullet
-                if self.bullet_type_zp == BULLET_TYPE_YELLOW:
-                    Screen.sprite_color[1] = COLOR_BULLET_YELLOW
-                elif self.bullet_type_zp == BULLET_TYPE_BLUE:
-                    Screen.sprite_color[1] = COLOR_BULLET_BLUE
-                else:
-                    Screen.sprite_color[1] = COLOR_BULLET
+                Screen.sprite_color[1] = self.bullet_type_zp
                 # Re-enable bullet sprite (was hidden by IRQ on collision)
                 self.sprite_en_zp = self.sprite_en_zp | 0x02
                 Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
@@ -2537,15 +2496,9 @@ class Game:
         # Restore cannon sprite only if no effect started
         if self.effect_phase == 0:
             Screen.sprite_ptr[0] = CANNON_BLOCK_READY
-            # Load next bullet into cannon (update bullet_type for next shot)
+            # Load next bullet into cannon (bullet_type IS the color!)
             self.bullet_type_zp = self.next_bullet_type_zp
-            # Set sprite color to match the newly loaded bullet
-            if self.bullet_type_zp == BULLET_TYPE_YELLOW:
-                Screen.sprite_color[1] = COLOR_BULLET_YELLOW
-            elif self.bullet_type_zp == BULLET_TYPE_BLUE:
-                Screen.sprite_color[1] = COLOR_BULLET_BLUE
-            else:
-                Screen.sprite_color[1] = COLOR_BULLET
+            Screen.sprite_color[1] = self.bullet_type_zp
             # Re-enable bullet sprite (was hidden by IRQ on collision)
             self.sprite_en_zp = self.sprite_en_zp | 0x02
             Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
@@ -2763,7 +2716,7 @@ class Game:
             pak_y = 14
         else:
             Screen.print_center(10, "GAME OVER!", WHITE, BG_STATUS)
-            pak_y = 12
+            pak_y = 13
 
         # Clear key buffer
         while getkey() != 0:
@@ -2830,8 +2783,9 @@ class Game:
         self.last_jiffy = jiffy_lo  # Initialize delta timing baseline
 
         # Initialize bullet types - first bullet is ALWAYS white for consistency
-        self.bullet_type_zp = BULLET_TYPE_WHITE
-        self.next_bullet_type_zp = BULLET_TYPE_WHITE  # First loaded in cannon is white
+        # NOTE: bullet_type IS the color (no separate type/color mapping!)
+        self.bullet_type_zp = COLOR_BULLET
+        self.next_bullet_type_zp = COLOR_BULLET  # First loaded in cannon is white
         # Sprite color will be set to white by init_sprites() below
 
         # Draw title screen
