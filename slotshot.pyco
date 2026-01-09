@@ -46,6 +46,8 @@ SPRITE_BLOCK = 0          # Block 0 within bank
 COLOR = 0xD800
 
 # CIA1 registers
+CIA1_TA_LO = 0xDC04           # Timer A low byte (~1MHz, excellent entropy source)
+CIA1_TA_HI = 0xDC05           # Timer A high byte
 CIA1_ICR = 0xDC0D
 
 # Work buffer memory - use $0400 area (default screen RAM, safe from stack!)
@@ -61,8 +63,8 @@ MAX_HOLES = 4                 # Maximum holes per column (1-4 random)
 MAX_HOLES_MASK = 3            # Bitmask for holes (0-3, then +1 = 1-4)
 
 # Random state in safe user ZP area (16-bit for Galois LFSR)
-RANDOM_STATE_ADDR = 0xFD       # $FD-$FE for 16-bit state
-RANDOM_COUNTER_ADDR = 0xFB     # $FB for counter (extra randomness)
+RANDOM_STATE_ADDR = 0xFD       # $FD-$FE for 16-bit LFSR state
+RANDOM_WEYL_ADDR = 0xF9        # $F9-$FA for 16-bit Weyl sequence (breaks LFSR linearity)
 
 KERNAL_RPTFLG = 0x028A  # $00=default (CRSR/SPACE only), $80=all keys, $40=none
 
@@ -597,12 +599,12 @@ def sfx_play_fire():
     # SID registers - irq_safe because sfx_tick also writes from IRQ
     freq: word[SID_CH3_FREQ] = 0xb000
     ctrl: byte[SID_CH3_CTRL] = 0x81
-    ad: byte[SID_CH3_AD] = 0x87
+    ad: byte[SID_CH3_AD] = 0x07
     sr: byte[SID_CH3_SR] = 0x20
     # State (ZP) - irq_safe because sfx_tick reads these from IRQ
     active: byte[ZP_SFX_ACTIVE] = 1
     timer: byte[ZP_SFX_TIMER] = 9
-    curr_freq: irq_safe[word[ZP_SFX_FREQ]] = 0xb000
+    curr_freq: word[ZP_SFX_FREQ] = 0xb000
     delta: sbyte[ZP_SFX_DELTA] = -1000
 
 
@@ -662,7 +664,7 @@ def sfx_play_slide():
     """Slide sound - quick 'sutty' swoosh upward."""
     # SID registers - irq_safe because sfx_tick also writes from IRQ
     freq: irq_safe[word[SID_CH3_FREQ]] = 0x2000
-    ctrl: byte[SID_CH3_CTRL]
+    ctrl: byte[SID_CH3_CTRL] = 0x81
     ad: byte[SID_CH3_AD] = 0x00
     sr: byte[SID_CH3_SR] = 0x50
     # State (ZP) - irq_safe because sfx_tick reads these from IRQ
@@ -1379,38 +1381,50 @@ class Sprites:
 @singleton
 class Random:
     """
-    16-bit Galois LFSR with dual-byte mixing.
-    Combines high byte (better stats) with low byte (faster change).
-    Counter adds extra variation with coprime step.
-    Period: 65535 (visits every non-zero 16-bit value exactly once)
+    16-bit Galois LFSR + Weyl sequence for streak-free randomness.
+
+    The LFSR alone produces correlated consecutive values (causing streaks).
+    The Weyl sequence (adding an odd constant each step) breaks this correlation
+    because LFSR + Weyl creates unpredictable jumps across the full range.
+
+    The add+xor mixing diffuses bits better than pure XOR.
+    Period: 65535 (LFSR) × 65536 (Weyl) = effectively unlimited for games.
     """
     state: word[RANDOM_STATE_ADDR]
     state_lo: byte[RANDOM_STATE_ADDR]      # Direct access to low byte
     state_hi: byte[RANDOM_STATE_ADDR + 1]  # Direct access to high byte
-    jiffy: word[JIFFY_HI_ADDR]             # Jiffy clock high byte for seeding
-    jiffy_lo: byte[JIFFY_LO_ADDR]          # Jiffy clock low byte for whitening
-    raster: byte[VIC_RASTER]               # Raster for extra seed entropy
-    counter: byte[RANDOM_COUNTER_ADDR]     # Counter for extra randomness
+    weyl: word[RANDOM_WEYL_ADDR]           # Weyl sequence (breaks LFSR linearity)
+    weyl_lo: byte[RANDOM_WEYL_ADDR]        # Direct access for mixing
+    weyl_hi: byte[RANDOM_WEYL_ADDR + 1]    # Direct access for mixing
+    cia1_timer: word[CIA1_TA_LO]           # CIA1 Timer A (~1MHz, fast entropy)
+    raster: byte[VIC_RASTER]               # VIC-II raster (~15kHz, independent HW!)
 
     def __init__():
-        """Seed from jiffy clock XOR raster for maximum entropy"""
-        self.state = (self.jiffy ^ (word(self.raster) << 1)) | 0x0100
+        """Seed from CIA timer (fast) + VIC raster (independent hardware)."""
+        # word(byte) << 8 is now optimized by compiler (no shift loop!)
+        # LFSR must never be 0, Weyl should be odd
+        self.state = (self.cia1_timer ^ (word(self.raster) << 8)) | 0x0001
+        self.weyl = (self.cia1_timer + word(self.raster)) | 0x0001
 
     def next() -> byte:
-        """Single LFSR step - polynomial x^16 + x^14 + x^13 + x^11 + 1"""
+        """One step with LFSR + Weyl mixing. Returns streak-free 8-bit value."""
+        x: byte
+        # 16-bit Galois LFSR: polynomial x^16 + x^14 + x^13 + x^11 + 1
         if self.state & 1:
             self.state = (self.state >> 1) ^ 0xB400
         else:
             self.state = self.state >> 1
-        # Decrement counter (coprime step for better distribution)
-        self.counter -= 7
-        # Combine BOTH bytes for maximum bit mixing
-        # High byte: better stats, Low byte: faster change rate
-        return (self.state_hi ^ self.state_lo) ^ self.counter
+        # Weyl sequence: add odd constant (0x61C8) - breaks LFSR linearity!
+        self.weyl = self.weyl + 0x61C9
+        # Add+XOR mixing: better diffusion than pure XOR
+        # Cross-combines LFSR and Weyl bytes for maximum decorrelation
+        x = (self.state_hi + self.weyl_lo) ^ (self.state_lo + self.weyl_hi)
+        return x
 
     def range(max_val: byte) -> byte:
-        """For non-power-of-2 values (still has modulo bias)"""
-        return self.next() % max_val
+        """Unbiased range mapping using multiplication. Returns 0 to max_val-1."""
+        # floor(next * max / 256) - avoids modulo bias!
+        return byte(word(self.next()) * max_val >> 8)
 
     @relocate(0xC140)
     def range_mask(mask: byte) -> byte:
@@ -1424,18 +1438,8 @@ class Random:
 
 @singleton
 class HighScore:
-    value: word = 0
-
-    def update(score: word):
-        """Update high score if new score is higher."""
-        if score > self.value:
-            self.value = score
-
-    def is_beaten(score: word) -> bool:
-        """Returns True if current score exceeds high score (but not if high score is 0)."""
-        if self.value == 0:
-            return False
-        return score > self.value
+    """ Store the high score value. """
+    score: word = 0
 
 
 # =============================================================================
@@ -1755,9 +1759,9 @@ class Game:
             Screen.print_number(27, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
 
         # Show "H-" prefix and high score, or current score
-        if self.showing_high_score and HighScore.value > 0:
+        if self.showing_high_score and HighScore.score > 0:
             Screen.print_at(6, 24, " H-", COLOR_HIGH_SCORE_LABEL, BG_STATUS)
-            display_value = HighScore.value
+            display_value = HighScore.score
             label_color = COLOR_HIGH_SCORE_LABEL
             score_color = COLOR_HIGH_SCORE
         else:
@@ -1765,7 +1769,7 @@ class Game:
             score_color = COLOR_STATUS_TEXT_HIGHLIGHT
             display_value = self.score
             # Highlight if beating high score
-            if HighScore.is_beaten(self.score):
+            if HighScore.score and HighScore.score < self.score:
                 # Play sound once when first beating high score
                 if not self.high_score_beaten:
                     self.high_score_beaten = True
@@ -1777,7 +1781,7 @@ class Game:
 
         if not best:
             Screen.print_at(9, 24, "SCORE:", label_color, BG_STATUS)
-        Screen.print_number(17, 24, display_value, 5, score_color, BG_STATUS)
+        Screen.print_number(15, 24, display_value, 5, score_color, BG_STATUS)
 
     def update_score_display():
         """Handle alternating score/high score display (call every frame)."""
@@ -2650,8 +2654,15 @@ class Game:
             sparkle_phase = 1  # Start animation
 
     def update():
-        # Sprite movement and collision detection handled by raster IRQ (irq_handler)
-        # Main loop handles grid logic, gravity, effects, and scroll
+        """
+        Update the game state
+
+        - Sprite movement and collision detection handled by raster IRQ (irq_handler)
+        - Grid scroll (handles timing and column generation)
+        - Update progress bar (shows time until next column)
+        - Update elapsed time periodically (~4x per second)
+        - Sparkle effect - random tile highlights
+        """
         filled: byte
         jiffy_lo: byte[JIFFY_LO_ADDR]
 
@@ -2745,7 +2756,8 @@ class Game:
 
         if self.game_over:
             # Update high score before showing game over window
-            HighScore.update(self.score)
+            if self.score > HighScore.score:
+                HighScore.score = self.score
             music_stop_fade(25)
 
             # Border and status bar flash animation (red flashing)
