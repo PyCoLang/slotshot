@@ -217,9 +217,9 @@ def _slotshot_gameover_song_data():
 
 // Song timing parameters
 slotshot_gameover_ticks_init:
-    .byte 6, 6
+    .byte 7, 7
 slotshot_gameover_furnace_hz:
-    .byte 50
+    .byte 60
 
 // ============ PATTERN DATA ============
 slotshot_gameover_patterns:
@@ -247,7 +247,7 @@ slotshot_gameover_order2H:
 
 // Instrument flags (10 bytes per instrument)
 slotshot_gameover_insF:
-    .byte 64, 47, 202, 119, 1, 76, 64, 16, 151, 1
+    .byte 64, 45, 89, 83, 2, 76, 192, 64, 90, 0
 
 slotshot_gameover_insFL:
     .byte <(slotshot_gameover_insF + 0)

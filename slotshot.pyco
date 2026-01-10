@@ -14,6 +14,7 @@ include("slotshot_image_rle")
 # CRITICAL: Song BEFORE musicplayer for feature-based DCE!
 include("slotshot_music")
 include("slotshot_gameover_music")
+include("slotshot_highscore_music")
 include("musicplayer")
 
 # =============================================================================
@@ -209,7 +210,8 @@ INITIAL_COLUMNS = 7         # Number of columns to spawn at game start
 INITIAL_SCORE = 9           # Starting score (each shot costs 1 point)
 
 # Raster position for sprite updates
-IRQ_RASTER_BOTTOM = 226         # Sprite updates (timing not critical)
+IRQ_RASTER_PLAY_AREA_BOTTOM = 226         # Sprite updates (timing not critical)
+IRQ_RASTER_BOTTOM = 250
 
 # =============================================================================
 # COLORS (C64 palette)
@@ -274,7 +276,7 @@ CHAR_NEXT_BL = 41                 # Block bottom-left with "x"
 CHAR_NEXT_BR = 42                 # Block bottom-right with "t"
 COLOR_SPARKLE_1 = GREY        # Sparkle phase 1 (darker)
 COLOR_SPARKLE_2 = LIGHT_GREY  # Sparkle phase 2 (brighter)
-COLOR_GAME_OVER_FLASH = LIGHT_RED
+COLOR_GAME_OVER_FLASH = RED
 
 # HIGH SCORE CONFIGURATION
 COLOR_HIGH_SCORE_LABEL = GREY
@@ -337,8 +339,8 @@ SPARKLE_BLOCK = 3          # Block 3: sparkle ($C0C0)
 STAR_BLOCK = 4             # Block 4: star ($C100) - used for title screen stars
 
 # Sparkle effect constants
-SPARKLE_PHASE_MAX = 3       # Color fade phases (1=dark, 2=light, 3=dark again)
-SPARKLE_SPAWN_CHANCE = 245  # Higher = rarer (200 ≈ 22% per frame when free)
+SPARKLE_PHASE_MAX = 4       # Color fade phases (1=dark, 2=light, 3=dark again)
+SPARKLE_SPAWN_CHANCE = 220  # Higher = rarer (200 ≈ 22% per frame when free)
 
 # =============================================================================
 # SHARED ZERO PAGE VARIABLES (IRQ <-> Main loop communication)
@@ -361,8 +363,9 @@ ZP_CANNON_ROW = 0x32       # byte: cannon grid row (0-9)
 ZP_SPRITE_ENABLE = 0x33    # byte: sprite enable shadow register (game sprites 0-2 only)
 ZP_STAR_MASK = 0x39        # byte: star sprite enable mask (sprites 3-7)
 
-# Sparkle ZP state - single byte for sprite 2 (phase 0=off, 1-3=active)
+# Sparkle ZP state - sprite 2 control
 ZP_SPARKLE_PHASE = 0x38     # byte: sparkle phase (0=off, 1-3=animating)
+ZP_SPARKLE_POS = 0x4A       # word: sparkle screen position (for IRQ validation)
 
 # Joystick temp
 ZP_JOY_TMP = 0x34        # byte: direction bits (bit 0=up, 1=down, 2=fire)
@@ -840,6 +843,7 @@ def irq_handler(vic: byte, cia1: byte):
 
     # Sparkle effect variables (single sprite)
     sparkle_phase: byte[ZP_SPARKLE_PHASE]
+    sparkle_pos: word[ZP_SPARKLE_POS]
     sprite_color: array[byte, 8][SPRITE_COLOR_0]
 
     # Game timer variables (ZP-mapped for main loop access)
@@ -1001,43 +1005,51 @@ def irq_handler(vic: byte, cia1: byte):
         # --- Sparkle effect update ---
         # Update sparkle sprite 2 - color fade
         if sparkle_phase != 0:
-            # Color fade based on phase (1=dark, 2=light peak, 3=dark)
-            if sparkle_phase == 2:
-                sprite_color[2] = COLOR_SPARKLE_2  # Light peak
-            else:
-                sprite_color[2] = COLOR_SPARKLE_1  # Dark (phase 1 or 3)
-            # Advance phase
-            sparkle_phase += 1
-            if sparkle_phase > SPARKLE_PHASE_MAX:
-                # Animation complete - disable sprite 2
+            # Check if the block is still there (not removed by bullet/cascade)
+            color = color_ram[sparkle_pos] & 0x0F
+            if color == BLACK:
+                # Block disappeared - cancel sparkle immediately
                 sparkle_phase = 0
                 sprite_en = sprite_en & 0xFB  # Clear bit 2
                 sprite_enable = sprite_en | star_mask
+            else:
+                # Block still there - continue animation
+                # Color fade based on phase (1=dark, 2=light peak, 3=dark)
+                if sparkle_phase == 2:
+                    sprite_color[2] = COLOR_SPARKLE_2  # Light peak
+                else:
+                    sprite_color[2] = COLOR_SPARKLE_1  # Dark (phase 1 or 3)
+                # Advance phase
+                sparkle_phase += 1
+                if sparkle_phase > SPARKLE_PHASE_MAX:
+                    # Animation complete - disable sprite 2
+                    sparkle_phase = 0
+                    sprite_en = sprite_en & 0xFB  # Clear bit 2
+                    sprite_enable = sprite_en | star_mask
 
         # Play music
         music_tick()
         return
 
     # --- CIA1 Timer A (always 60 Hz, platform independent!) ---
-    if cia1 & 0x01:
-        # Play sound effects
-        sfx_tick()
+    # Play sound effects
+    sfx_tick()
 
-        # --- Game timer update ---
-        frame_counter += 1
-        if frame_counter >= 60 and not paused:
-            frame_counter = 0
-            game_seconds += 1
+    # --- Game timer update ---
+    frame_counter += 1
+    if frame_counter >= 60 and not paused:
+        frame_counter = 0
+        game_seconds += 1
 
-        # --- Update star visibility based on Color RAM ---
-        star_mask = 0xF8  # Start with all stars enabled
-        for i in range(5):
-            pos = game_star_color_positions_data[i]
-            if (color_ram[pos] & 0x0F) != BLACK:
-                star_mask = star_mask & (0xFF ^ byte(1 << (3 + i)))
-        sprite_enable = sprite_en | star_mask
+    # --- Update star visibility based on Color RAM ---
+    star_mask = 0xF8  # Start with all stars enabled
+    for i in range(5):
+        pos = game_star_color_positions_data[i]
+        if (color_ram[pos] & 0x0F) != BLACK:
+            star_mask = star_mask & (0xFF ^ byte(1 << (3 + i)))
+    sprite_enable = sprite_en | star_mask
 
-        joy_handler()
+    joy_handler()
 
     # Epilogue runs here - chains to system IRQ (keyboard, jiffy clock)
 
@@ -1092,9 +1104,8 @@ def irq_title_handler(vic: byte, cia1: byte):
         return
 
     # --- CIA1 Timer A (always 60 Hz, platform independent!) ---
-    if cia1 & 0x01:
-        # --- Joystick reading (inject keys into keyboard buffer) ---
-        joy_handler()
+    # --- Joystick reading (inject keys into keyboard buffer) ---
+    joy_handler()
 
     # Epilogue runs here - chains to system IRQ (keyboard, jiffy clock)
 
@@ -1106,14 +1117,12 @@ def irq_screen_handler(vic: byte, cia1: byte):
     if vic & 0x01:
         # Acknowledge VIC interrupt
         vic = 0x01
-
         # Play music
         music_tick()
+        return
 
-    if cia1 & 0x01:
-        # --- Joystick reading (inject keys into keyboard buffer) ---
-        joy_handler()
-
+    # --- Joystick reading (inject keys into keyboard buffer) ---
+    joy_handler()
     # Epilogue runs here - chains to system IRQ (keyboard, jiffy clock)
 
 
@@ -1191,7 +1200,7 @@ class Screen:
         vic_ctrl: byte[VIC_CTRL1]
         for _ in range(count):
             # Wait for lower border
-            while self.raster < IRQ_RASTER_BOTTOM and (vic_ctrl & 0x80) == 0:
+            while self.raster < IRQ_RASTER_PLAY_AREA_BOTTOM and (vic_ctrl & 0x80) == 0:
                 pass
             # Wait for raster 256+ (bit 8 set in $D011)
             while (vic_ctrl & 0x80) == 0:
@@ -1201,8 +1210,8 @@ class Screen:
 
     def set_game_mode():
         # Set background and border colors
-        self.background = COLOR_SCREEN_BG
         __sei__()
+        self.background = COLOR_SCREEN_BG
         # Configure VIC for ECM text mode (game)
         self.vic_memptr = GAME_MEMPTR
         # ECM ON (bit 6), DEN ON (bit 4), Bitmap OFF (bit 5), preserve raster MSB (bit 7 masked)
@@ -1215,12 +1224,14 @@ class Screen:
 
     def set_bitmap_mode():
         """Configure VIC for multicolor bitmap mode (title screen)."""
+        __sei__()
         # Set background and border colors
         self.border = SLOTSHOT_BGCOLOR
         self.background = SLOTSHOT_BGCOLOR
         # The IRQ will switch to the bitmap mode
         # Bank 3 ($C000-$FFFF)
         self.cia2_pra = self.cia2_pra & 0xFC  # Bank 3 ($C000-$FFFF)
+        __cli__()
 
     def print_at(x: byte, y: byte, text: alias[string], col: byte, bg: byte):
         """Print text with ECM background select (bg = BG_PLAY/BG_TITLE/BG_STATUS/BG_HIGHLIGHT)."""
@@ -1533,9 +1544,9 @@ class Grid:
                 return True
         return False
 
-    def remove_complete_column(col: byte):
+    def shift_columns_right(col: byte):
         """
-        Remove complete column and shift LEFT columns to the RIGHT.
+        Shift columns 0..(col-1) one position to the RIGHT, overwriting column 'col'.
         This "pushes back" the blocks, giving the player more space!
         NOTE: Flash effect is handled by Game.update_effect() state machine.
         """
@@ -1545,13 +1556,10 @@ class Grid:
 
         # Shift columns RIGHT: copy from col-1 down to 0
         # Each iteration: copy column c to column c+1
-        # CRITICAL: process RIGHT to LEFT to avoid overwriting data before copying!
-        c = col
-        while c > 0:
-            c -= 1
+        # Must process RIGHT to LEFT - blkcpy backward only works per-row, not per-column!
+        for c in range(col - 1, -1, -1):
             src_offset = row_offset_data[PLAY_TOP] + word(c) * BLOCK_WIDTH
             dst_offset = src_offset + BLOCK_WIDTH
-            # Copy both screen RAM and color RAM
             blkcpy(Screen.screen, src_offset, Screen.screen, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
             blkcpy(Screen.colors, src_offset, Screen.colors, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
 
@@ -1676,7 +1684,7 @@ class Game:
         # Row 0: bottom halves (these appear at top of title bar)
         # Row 1: top halves (these appear at bottom of title bar)
         for x in range(8):
-            Screen.screen[16+ x] = title_row0_data[x] + BG_TITLE
+            Screen.screen[16 + x] = title_row0_data[x] + BG_TITLE
             Screen.screen[16 + 40 + x] = title_row1_data[x] + BG_TITLE
             # Apply gradient: every 2 characters change color
             if x < 4:
@@ -1698,7 +1706,8 @@ class Game:
             Screen.print_number(27, 23, word(self.level), 2, COLOR_STATUS_TEXT_HIGHLIGHT, BG_STATUS)
 
         # Show "H-" prefix and high score, or current score
-        if self.showing_high_score and HighScore.score > 0:
+        # When game is over, always show player's score (not alternating high score)
+        if self.showing_high_score and HighScore.score > 0 and not self.game_over:
             Screen.print_at(6, 24, " H-", COLOR_HIGH_SCORE_LABEL, BG_STATUS)
             display_value = HighScore.score
             label_color = COLOR_HIGH_SCORE_LABEL
@@ -1812,17 +1821,13 @@ class Game:
     def start_effect(col: byte):
         """Start column clear effect animation."""
         row: byte
-        sx: byte
         pos: word
         # Column clear sound - cheerful rising arpeggio chime. Delayed start.
         sfx_pending: byte[ZP_SFX_PENDING] = 1
 
-        # Calculate screen X position
-        sx = col * BLOCK_WIDTH
-
         # Save original colors
         for row in range(GRID_HEIGHT):
-            pos = row_offset_data[PLAY_TOP + row * BLOCK_HEIGHT] + sx
+            pos = row_offset_data[PLAY_TOP + row * BLOCK_HEIGHT] + col * BLOCK_WIDTH
             self.effect_saved_colors[row] = Screen.colors[pos] & 0x0F
 
         # Start effect state machine
@@ -1833,7 +1838,6 @@ class Game:
         # Hide bullet sprite during effect animation
         self.sprite_en_zp = self.sprite_en_zp & 0xFD
         Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
-
 
     def check_complete_columns():
         """
@@ -1857,8 +1861,8 @@ class Game:
         """Update the column number and store active column count."""
         col: byte
         n: byte = 0
-        for col in range(GRID_WIDTH, 0, -1):
-            if self.grid.has_block(col - 1):
+        for col in range(GRID_WIDTH - 1, -1, -1):
+            if self.grid.has_block(col):
                 n += 1
 
         # Store for slide sound decision
@@ -2134,7 +2138,7 @@ class Game:
                 # Formula: if (GRID_WIDTH - effect_col) < active_col_count, there are blocks to the left
                 # This saves CPU time by skipping unnecessary blkcpy calls when nothing would move
                 if GRID_WIDTH - self.effect_col < self.active_col_count:
-                    self.grid.remove_complete_column(self.effect_col)
+                    self.grid.shift_columns_right(self.effect_col)
                     sfx_play_slide()
 
                 # Update score (cascade clears give bonus points!)
@@ -2418,8 +2422,20 @@ class Game:
         self.bullet_hit_zp = 0
         hit_col = self.bullet_hit_col_zp
 
-        # Hit column 0 means no block was placed
+        # Hit column 0 means no block was placed - bullet hit a block in col 0!
+        # This means the row is completely blocked - immediate game over!
         if hit_col == 0:
+            # Check if there's actually a block in col 0 (game over condition)
+            if self.is_game_over():
+                # Switch to empty cannon sprite - the killer block shows through!
+                Screen.sprite_ptr[0] = CANNON_BLOCK_FIRED
+                # Hide bullet sprite for game over screen
+                self.sprite_en_zp = self.sprite_en_zp & 0xFD
+                Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
+                self.game_over = True
+                self.running = False
+                return
+            # No block in col 0 - just restore cannon state
             if self.effect_phase == 0:
                 Screen.sprite_ptr[0] = CANNON_BLOCK_READY
                 # Load next bullet into cannon (bullet_type IS the color!)
@@ -2431,6 +2447,18 @@ class Game:
                 # NOW determine next bullet type (indicator shows what comes AFTER loaded one)
                 self.determine_next_bullet()
             return
+
+        # If bullet hit col 1, the block was placed in col 0 - immediate game over!
+        if hit_col == 1:
+            if self.is_game_over():
+                # Switch to empty cannon sprite - the killer block shows through!
+                Screen.sprite_ptr[0] = CANNON_BLOCK_FIRED
+                # Hide bullet sprite for game over screen
+                self.sprite_en_zp = self.sprite_en_zp & 0xFD
+                Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
+                self.game_over = True
+                self.running = False
+                return
 
         # Check for complete columns
         self.check_complete_columns()
@@ -2540,6 +2568,7 @@ class Game:
     def try_spawn_sparkle():
         """Try to spawn a sparkle effect on a random colored tile."""
         sparkle_phase: byte[ZP_SPARKLE_PHASE]
+        sparkle_pos: word[ZP_SPARKLE_POS]
         sprite_x: array[byte, 16][SPRITE_X]
         sprite_y: array[byte, 16][SPRITE_Y]
         sprite_x_msb: byte[SPRITE_X_MSB]
@@ -2590,6 +2619,7 @@ class Game:
             # Enable sprite 2 and set phase to start animation
             self.sprite_en_zp = self.sprite_en_zp | 0x04
             Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
+            sparkle_pos = pos  # Save position for IRQ validation
             sparkle_phase = 1  # Start animation
 
     def update():
@@ -2661,7 +2691,7 @@ class Game:
 
         # Show "NEW HIGHSCORE!" if player beat the high score
         if self.high_score_beaten:
-            Screen.print_center(10, "CONGRATULATIONS", WHITE, BG_STATUS)
+            Screen.print_center(9, "CONGRATULATIONS!", WHITE, BG_STATUS)
             Screen.print_center(12, "NEW HIGHSCORE!", LIGHT_RED, BG_STATUS)
             pak_y = 14
         else:
@@ -2690,7 +2720,7 @@ class Game:
         # Main game loop
         while self.running:
             self.handle_input()
-            Screen.sync_raster(IRQ_RASTER_BOTTOM)
+            Screen.sync_raster(IRQ_RASTER_PLAY_AREA_BOTTOM)
             self.update()
 
         if self.game_over:
@@ -2698,6 +2728,9 @@ class Game:
             if self.score > HighScore.score:
                 HighScore.score = self.score
             music_stop_fade(25)
+
+            # Refresh status bar to show player's score (not alternating H-SCORE)
+            self.update_status()
 
             # Border and status bar flash animation (red flashing)
             for _ in range(5):
@@ -2713,8 +2746,10 @@ class Game:
             music_set_volume(5)
             if not self.high_score_beaten:
                 slotshot_gameover_music_vic_init()
-                music_enable_all_ch()
-                music_disable_loop()
+            else:
+                slotshot_highscore_music_vic_init()
+            music_enable_all_ch()
+            music_disable_loop()
 
             self.show_game_over_window()
 
@@ -2754,7 +2789,7 @@ class Game:
 
         # Initialize raster IRQ (sprite updates and joystick)
         __set_irq__(irq_handler)
-        __enable_raster_irq__(IRQ_RASTER_BOTTOM)
+        __enable_raster_irq__(IRQ_RASTER_PLAY_AREA_BOTTOM)
 
         # Initialize column pool (pre-generate random patterns)
         self.grid.init_pool()
@@ -2911,7 +2946,7 @@ class TitleScreen:
         """Clean up title screen resources (IRQ, sprites, etc.)."""
         cia1_icr: byte[CIA1_ICR]
 
-        Screen.sync_raster(250)
+        Screen.sync_raster(IRQ_RASTER_BOTTOM)
 
         # Disable star sprites (bits 3-7)
         Screen.sprite_enable &= 0x07
@@ -2920,9 +2955,9 @@ class TitleScreen:
         memfill(self.colorram, BLACK)
         memfill(self.screen_data, CHAR_SPACE)
 
-        __disable_raster_irq__()
-        cia1_icr = 0x81
+        Screen.sync_raster(IRQ_RASTER_BOTTOM)
         __set_irq__(irq_screen_handler)
+        cia1_icr = 0x81  # Reenable CIA1 if it was disabled by the irq handler
 
     def wait_menu():
         # Display title screen, return selection: 0=Play, 2=Story, 3=Credits
@@ -2940,7 +2975,7 @@ class TitleScreen:
 
         # Menu loop
         while True:
-            Screen.sync_raster(250)
+            Screen.sync_raster(IRQ_RASTER_BOTTOM)
 
             # Neon flash on title
             frame_counter += 1
@@ -3046,7 +3081,7 @@ class StoryScreen:
         Screen.print_center(22, "13337 LIVES AT STAKE", YELLOW, 0)
 
     def __init__():
-        Screen.sync_raster(250)
+        Screen.sync_raster(IRQ_RASTER_BOTTOM)
         # Set game mode (ECM text mode)
         Screen.set_game_mode()
         # Draw story content
@@ -3085,7 +3120,7 @@ class AboutScreen:
         Screen.print_center(22, "SPACE / FIRE", LIGHT_GREY, 0)
 
     def __init__():
-        Screen.sync_raster(250)
+        Screen.sync_raster(IRQ_RASTER_BOTTOM)
         # Set game mode (ECM text mode)
         Screen.set_game_mode()
         # Draw about content
@@ -3145,7 +3180,7 @@ class DonateScreen:
         Screen.print_at(2, 16, "THANK YOU", GREEN, 0)
 
     def __init__():
-        Screen.sync_raster(250)
+        Screen.sync_raster(IRQ_RASTER_BOTTOM)
         Screen.set_game_mode()
         # Draw content
         self.draw_qr()

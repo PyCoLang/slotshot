@@ -26,6 +26,8 @@ pycoc music "$SCRIPT_DIR/music/slotshot.fur" \
     -o "$INCLUDES_DIR/slotshot_music.pyco"
 pycoc music "$SCRIPT_DIR/music/slotshot_gameover.fur" \
     -o "$INCLUDES_DIR/slotshot_gameover_music.pyco"
+pycoc music "$SCRIPT_DIR/music/slotshot_highscore.fur" \
+    -o "$INCLUDES_DIR/slotshot_highscore_music.pyco"
 
 echo ""
 echo "=== Done ==="

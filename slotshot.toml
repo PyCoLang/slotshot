@@ -1,0 +1,19 @@
+# PyCo Project Configuration for Slotshot
+# This file configures D64 disk image creation for multi-file projects.
+
+[project]
+name = "Slotshot"
+version = "1.0"
+
+[disk]
+label = "slotshot"
+id = "42"
+
+# Main program (first file = autostart)
+[[disk.files]]
+source = "build/slotshot.prg"
+name = "slotshot"
+
+[run]
+autostart = true
+warp = true
