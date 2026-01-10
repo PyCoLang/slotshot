@@ -17,25 +17,8 @@ include("slotshot_gameover_music")
 include("musicplayer")
 
 # =============================================================================
-# MEMORY LAYOUT - VIC BANK 3 ($C000-$FFFF)
+# MEMORY LAYOUT - See work/memory_map.md for complete memory map!
 # =============================================================================
-# Program size: ~43KB (PRG: 43594 bytes), ends at ~$B239
-# Stack grows UPWARD from program end, has ~3KB headroom before VIC Bank 3.
-#
-# Full Memory Map:
-#   $0400-$0427: Column blit buffer (40 bytes)
-#   $0428-$06A7: Column pool (640 bytes, pre-generated patterns)
-#   $06A9-$07FF: FREE (344 bytes)
-#   $0801-$B238: Program (code + data + BSS, ~43KB)
-#   $B239-$BFFF: Stack headroom (~3KB)
-#
-# VIC Bank 3 Layout ($C000-$FFFF):
-#   $C000-$C13F: Sprite data (320 bytes, 5 sprites)
-#   $C140-$C3FF: FREE (704 bytes)
-#   $C400-$C7FF: Screen RAM (1KB)
-#   $C800-$CFFF: Charset (2KB) - shared by game AND title menu
-#   $D000-$DFFF: I/O (VIC/SID/CIA - not usable!)
-#   $E000-$FFFF: Title bitmap (8KB)
 SCREEN = 0xC400           # Screen RAM in bank 3
 CHARSET_RAM = 0xC800      # Custom charset location in bank 3 (shared with title)
 SPRITE_DATA_ADDR = 0xC000 # Sprite data at start of bank 3
@@ -63,8 +46,8 @@ MAX_HOLES = 4                 # Maximum holes per column (1-4 random)
 MAX_HOLES_MASK = 3            # Bitmask for holes (0-3, then +1 = 1-4)
 
 # Random state in safe user ZP area (16-bit for Galois LFSR)
-RANDOM_STATE_ADDR = 0xFD       # $FD-$FE for 16-bit LFSR state
-RANDOM_WEYL_ADDR = 0xF9        # $F9-$FA for 16-bit Weyl sequence (breaks LFSR linearity)
+RANDOM_STATE_ADDR = 0xFB       # $FB-$FC for 16-bit LFSR state
+RANDOM_WEYL_ADDR = 0xFD        # $FD-$FE for 16-bit Weyl sequence (breaks LFSR linearity)
 
 KERNAL_RPTFLG = 0x028A  # $00=default (CRSR/SPACE only), $80=all keys, $40=none
 
@@ -408,7 +391,7 @@ ZP_NEXT_BULLET_TYPE = 0x3B # byte: next bullet type to fire (shown in "Next" ind
 ZP_YELLOW_STATE = 0x3C     # byte: yellow bullet state (0=in wall, 1=in empty)
 ZP_YELLOW_LAST_EMPTY = 0x3D # byte: last empty column found by yellow bullet
 
-ZP_MENU_SELECTED = 0x40    # byte: selected menu item (0-3)
+ZP_MENU_SELECTED = 0x49    # byte: selected menu item (0-3)
 
 # =============================================================================
 # Mapped memory addresses
@@ -528,6 +511,8 @@ game_star_positions_data: tuple[word] = (
 )
 game_star_color_positions_data: tuple[word] = (204, 689, 459, 749, 272)
 
+STAR_COUNT = 5
+
 bitmap_rle: tuple[byte] = SLOTSHOT_BITMAP_RLE
 screen_rle: tuple[byte] = SLOTSHOT_SCREEN_RLE
 colorram_rle: tuple[byte] = SLOTSHOT_COLORRAM_RLE
@@ -623,7 +608,7 @@ def _sfx_start_clear():
     curr_freq: word[ZP_SFX_FREQ] = 0x1000
     delta: sbyte[ZP_SFX_DELTA] = 5
     phase: byte[ZP_SFX_PHASE] = 0
-    note_len: byte[ZP_SFX_NOTE_LEN] = 2       # Short notes for arpeggio effect
+    note_len: byte[ZP_SFX_NOTE_LEN] = 2
 
 
 @irq_helper
@@ -656,7 +641,7 @@ def sfx_play_bibip():
     curr_freq: irq_safe[word[ZP_SFX_FREQ]] = 0x2800
     delta: sbyte[ZP_SFX_DELTA] = 0
     phase: byte[ZP_SFX_PHASE] = 0
-    note_len: byte[ZP_SFX_NOTE_LEN] = 4       # Each beep is 6 frames (~100ms)
+    note_len: byte[ZP_SFX_NOTE_LEN] = 4
 
 
 @relocate(0xC140)
@@ -1182,18 +1167,14 @@ class Screen:
         for y in range(GRID_HEIGHT):
             screen_y = PLAY_TOP + y * BLOCK_HEIGHT
             pos = row_offset_data[screen_y]
-
             for x in range(GRID_WIDTH):
-                # Colors already BLACK from array init = invisible blocks
                 self.colors[pos] = BLACK
-                self.colors[pos + 1] = BLACK
-                self.colors[pos + 40] = BLACK
-                self.colors[pos + 41] = BLACK
-                # Top row of 2x2 block
                 self.screen[pos] = CHAR_BLOCK_TL
+                self.colors[pos + 1] = BLACK
                 self.screen[pos + 1] = CHAR_BLOCK_TR
-                # Bottom row of 2x2 block (next screen row = +40)
+                self.colors[pos + 40] = BLACK
                 self.screen[pos + 40] = CHAR_BLOCK_BL
+                self.colors[pos + 41] = BLACK
                 self.screen[pos + 41] = CHAR_BLOCK_BR
                 # Colors already BLACK from array init = invisible blocks
                 pos += BLOCK_WIDTH
@@ -1221,8 +1202,6 @@ class Screen:
     def set_game_mode():
         # Set background and border colors
         self.background = COLOR_SCREEN_BG
-        # Fill play area with block characters (color determines visibility)
-        self.init_play_area()
         __sei__()
         # Configure VIC for ECM text mode (game)
         self.vic_memptr = GAME_MEMPTR
@@ -1253,9 +1232,9 @@ class Screen:
         for i in range(len(text)):
             code = text[i]
             if code >= 65 and code <= 90:
-                code = code - 64
+                code -= 64
             elif code >= 97 and code <= 122:
-                code = code - 96
+                code -= 96
             elif code >= 48 and code <= 57:
                 pass
             # Add ECM background offset to character code
@@ -1274,34 +1253,17 @@ class Screen:
     def print_number(x: byte, y: byte, num: word, digits: byte, col: byte, bg: byte):
         """Print number with ECM background select."""
         pos: word
-        digit_arr: array[byte, 5]
-        digit_count: byte
         temp: word
         i: byte
 
-        pos = row_offset_data[y] + x
+        pos = row_offset_data[y] + x + digits - 1
         temp = num
-        digit_count = 0
 
-        if temp == 0:
-            digit_arr[0] = 0
-            digit_count = 1
-        else:
-            while temp > 0 and digit_count < 5:
-                digit_arr[digit_count] = temp % 10
-                temp = temp / 10
-                digit_count += 1
-
-        for i in range(digits - digit_count):
-            # 48 = '0' screen code, add ECM bg offset
-            self.screen[pos] = 48 + bg
+        for i in range(digits):
+            self.screen[pos] = 48 + (temp % 10) + bg
             self.colors[pos] = col
-            pos += 1
-
-        for i in range(digit_count):
-            self.screen[pos] = 48 + digit_arr[digit_count - 1 - i] + bg
-            self.colors[pos] = col
-            pos += 1
+            temp = temp / 10
+            pos -= 1
 
     def draw_progress_bar(filled: byte):
         """
@@ -1309,12 +1271,9 @@ class Screen:
         filled = number of characters to show (0-40), depletes from right to left.
         Depleted segments show dark grey line instead of disappearing.
         """
-        pos: word
+        pos: word = PROGRESS_BAR_ROW * 40 + PROGRESS_BAR_START
         i: byte
         ecm_char: byte
-
-        # Calculate starting position (row 22, column 0)
-        pos = row_offset_data[PROGRESS_BAR_ROW] + PROGRESS_BAR_START
 
         # ECM character code - always use progress bar character
         ecm_char = CHAR_PROGRESS + BG_STATUS
@@ -1340,27 +1299,23 @@ class Sprites:
     """Sprite data storage and initialization."""
     # Star sprite needs runtime generation (simple dot pattern)
     # Other sprites (cannon, bullet, sparkle) handled by relocate tuples at $C000
-    star_data: array[byte, 64][SPRITE_DATA_ADDR + 256]
+    star_data: array[byte, 64][SPRITE_DATA_ADDR + 256] = [0]
 
     def __init__():
         """Initialize star sprite - other sprites already at target via relocate."""
         # Generate star sprite: 2x1 pixel dot in top-left
-        memfill(self.star_data, 0)
         self.star_data[0] = 0xC0  # %11000000 = leftmost 2 pixels
 
     def init_stars(positions: tuple[word], color: byte):
         """Initialize star sprites (sprites 3-7)."""
         i: byte
         x: word
-        star_count: byte
-
-        star_count = len(positions) / 2
 
         # Clear star sprite MSB bits (3-7)
         Screen.sprite_x_msb = Screen.sprite_x_msb & 0x07
 
         # Setup each star sprite
-        for i in range(star_count):
+        for i in range(STAR_COUNT):
             x = positions[i * 2]
             Screen.sprite_x[6 + i * 2] = x & 0xFF
             Screen.sprite_x[7 + i * 2] = positions[i * 2 + 1]
@@ -1408,7 +1363,6 @@ class Random:
 
     def next() -> byte:
         """One step with LFSR + Weyl mixing. Returns streak-free 8-bit value."""
-        x: byte
         # 16-bit Galois LFSR: polynomial x^16 + x^14 + x^13 + x^11 + 1
         if self.state & 1:
             self.state = (self.state >> 1) ^ 0xB400
@@ -1418,8 +1372,7 @@ class Random:
         self.weyl = self.weyl + 0x61C9
         # Add+XOR mixing: better diffusion than pure XOR
         # Cross-combines LFSR and Weyl bytes for maximum decorrelation
-        x = (self.state_hi + self.weyl_lo) ^ (self.state_lo + self.weyl_hi)
-        return x
+        return (self.state_hi + self.weyl_lo) ^ (self.state_lo + self.weyl_hi)
 
     def range(max_val: byte) -> byte:
         """Unbiased range mapping using multiplication. Returns 0 to max_val-1."""
@@ -1492,19 +1445,7 @@ class Grid:
         Get block color from Color RAM (BLACK = empty).
         NOTE: Color RAM is 4-bit only! Upper 4 bits are garbage on read!
         """
-        sx: byte
-        sy: byte
-        sx = col * BLOCK_WIDTH
-        sy = PLAY_TOP + row * BLOCK_HEIGHT
-        return Screen.colors[row_offset_data[sy] + sx] & 0x0F
-
-    def grid_to_screen_x(col: byte) -> byte:
-        """Convert grid column to screen X position."""
-        return col * BLOCK_WIDTH
-
-    def grid_to_screen_y(row: byte) -> byte:
-        """Convert grid row to screen Y position."""
-        return PLAY_TOP + row * BLOCK_HEIGHT
+        return Screen.colors[row_offset_data[PLAY_TOP + row * BLOCK_HEIGHT] + (col * BLOCK_WIDTH)] & 0x0F
 
     def spawn_column():
         """
@@ -1540,6 +1481,8 @@ class Grid:
         DARK_GREY blocks are added to dying list for flash animation.
         Called once per scroll, so blocks disappear after 4 scrolls.
         """
+        # Aging lookup: index=color, value=next color (0=skip)
+        aging: tuple[byte] = (0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 12)
         base_pos: word
         pos: word
         color: byte
@@ -1556,21 +1499,17 @@ class Grid:
                 pos = base_pos + word(col) * BLOCK_WIDTH
                 color = Screen.colors[pos] & 0x0F
 
-                # Age player blocks (white/grey shades only)
-                if color == WHITE:
-                    color = LIGHT_GREY
-                elif color == LIGHT_GREY:
-                    color = GREY
-                elif color == GREY:
-                    color = DARK_GREY
-                elif color == DARK_GREY:
-                    # Don't change to BLACK yet - add to dying list for animation!
+                # DARK_GREY → dying animation (special case)
+                if color == DARK_GREY:
                     if self.dying_count < 40:
                         self.dying_positions[self.dying_count] = pos
                         self.dying_count += 1
-                    continue  # Keep DARK_GREY, animation will handle the rest
-                else:
-                    continue  # Not a player block, skip
+                    continue
+
+                # Lookup next color (0 = not a player block, skip)
+                color = aging[color]
+                if color == 0:
+                    continue
 
                 # Update all 4 cells of the 2x2 block
                 Screen.colors[pos] = color
@@ -2772,9 +2711,10 @@ class Game:
 
             # Play game over music
             music_set_volume(5)
-            slotshot_gameover_music_vic_init()
-            music_enable_all_ch()
-            music_disable_loop()
+            if not self.high_score_beaten:
+                slotshot_gameover_music_vic_init()
+                music_enable_all_ch()
+                music_disable_loop()
 
             self.show_game_over_window()
 
@@ -2787,6 +2727,8 @@ class Game:
         game_seconds: word[ZP_GAME_SECONDS] = 0
         jiffy_lo: byte[JIFFY_LO_ADDR]
 
+        # Fill play area with block characters (color determines visibility)
+        Screen.init_play_area()
         # Set up VIC for ECM text mode (game mode)
         Screen.set_game_mode()
         Screen.border = COLOR_SCREEN_BORDER
@@ -2882,6 +2824,7 @@ class TitleScreen:
 
     # Backup for neon flash - reuse game's column buffer area
     screen_backup: array[byte, 24][COLUMN_BUFFER_ADDR]
+    flash_part: byte = 0  # 0 = SLOT (first 11), 1 = SHOT (remaining 12)
 
     def decompress_image():
         """Decompress RLE image data to VIC memory."""
@@ -2915,11 +2858,27 @@ class TitleScreen:
                 self.colorram[pos + j] = color
 
     def flash_darken():
-        """Save screen RAM and darken white to light grey."""
+        """Save screen RAM and darken white to light grey for SLOT or SHOT."""
         col: byte
-        idx: word = 3 * 40 + 8
+        idx: word
         val: byte
-        for col in range(24):
+        start: byte
+        count: byte
+
+        # Random choice: SLOT (0) or SHOT (1)
+        self.flash_part = Random.next() & 1
+
+        if self.flash_part == 0:
+            # SLOT: first 11 characters
+            start = 0
+            count = 11
+        else:
+            # SHOT: remaining 12 characters
+            start = 11
+            count = 12
+
+        idx = 3 * 40 + 8 + word(start)
+        for col in range(count):
             val = self.screen_data[idx]
             self.screen_backup[col] = val
             if (val >> 4) == WHITE:
@@ -2929,10 +2888,22 @@ class TitleScreen:
             idx += 1
 
     def flash_restore():
-        """Restore screen RAM from backup."""
+        """Restore screen RAM from backup for the previously darkened part."""
         col: byte
-        idx: word = 3 * 40 + 8
-        for col in range(24):
+        idx: word
+        start: byte
+        count: byte
+
+        # Restore the previously darkened part
+        if self.flash_part == 0:
+            start = 0
+            count = 11
+        else:
+            start = 11
+            count = 12
+
+        idx = 3 * 40 + 8 + word(start)
+        for col in range(count):
             self.screen_data[idx] = self.screen_backup[col]
             idx += 1
 
@@ -2943,14 +2914,15 @@ class TitleScreen:
         Screen.sync_raster(250)
 
         # Disable star sprites (bits 3-7)
-        Screen.sprite_enable = Screen.sprite_enable & 0x07
+        Screen.sprite_enable &= 0x07
 
         memfill(self.bitmap_dest, 0)
         memfill(self.colorram, BLACK)
         memfill(self.screen_data, CHAR_SPACE)
 
-        __set_irq__(irq_screen_handler)
+        __disable_raster_irq__()
         cia1_icr = 0x81
+        __set_irq__(irq_screen_handler)
 
     def wait_menu():
         # Display title screen, return selection: 0=Play, 2=Story, 3=Credits
@@ -3037,6 +3009,7 @@ class TitleScreen:
         self.decompress_image()
         # Initialize star sprites for background effect
         Sprites.init_stars(title_star_positions_data, STAR_COLOR)
+
 
 
 class StoryScreen:
@@ -3256,4 +3229,3 @@ def main():
 
         elif menu_choice == 3:
             donate_screen()
-
