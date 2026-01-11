@@ -680,7 +680,6 @@ def sfx_tick():
             if active == 0:
                 # No sound playing, start clear now
                 _sfx_start_clear()
-                return
             else:
                 # Hit sound still playing, retry next frame
                 pending = 1
@@ -1495,7 +1494,6 @@ class Grid:
         Also updates Game.col_count[18] with pre-calculated block count.
         """
         pool_offset: word
-        offset: word
 
         # Pick random column from pool (unbiased multiplication-based range)
         pool_offset = word(Random.range(COLUMN_POOL_SIZE)) * COLUMN_ENTRY_SIZE
@@ -1503,23 +1501,20 @@ class Grid:
         # Read pre-calculated block count and store for rightmost column (index 18)
         self.col_count[18] = self.column_pool[pool_offset]
 
-        # Calculate Color RAM offset for rightmost column (chars 38-39)
-        offset = row_offset_data[PLAY_TOP] + 38
+        pool_offset += 1  # skip the count byte
 
         # 4 blkcpy calls to fill 2x2 blocks:
         # src_stride=1 (pool bytes are consecutive)
         # dst_stride=80 (2 screen rows = 80 bytes between blocks)
         # width=1, height=10 (10 blocks)
-        # NOTE: pool_offset + 1 skips the count byte
-
         # Top-left corner of each block
-        blkcpy(self.column_pool, pool_offset + 1, 1, Screen.colors, offset, 80, 1, 10)
+        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, PLAY_TOP * 40 + 38, 80, 1, 10)
         # Top-right corner
-        blkcpy(self.column_pool, pool_offset + 1, 1, Screen.colors, offset + 1, 80, 1, 10)
+        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, PLAY_TOP * 40 + 38 + 1, 80, 1, 10)
         # Bottom-left corner (+40 = next screen row)
-        blkcpy(self.column_pool, pool_offset + 1, 1, Screen.colors, offset + 40, 80, 1, 10)
+        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, PLAY_TOP * 40 + 38 + 40, 80, 1, 10)
         # Bottom-right corner
-        blkcpy(self.column_pool, pool_offset + 1, 1, Screen.colors, offset + 41, 80, 1, 10)
+        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, PLAY_TOP * 40 + 38 + 41, 80, 1, 10)
 
     def age_player_blocks():
         """
@@ -1566,13 +1561,6 @@ class Grid:
                 Screen.colors[pos + 40] = color
                 Screen.colors[pos + 41] = color
 
-    def is_column_complete(col: byte) -> bool:
-        """Check if column is complete (all rows have blocks) - O(1) using col_count."""
-        # Column 0 is cannon, never complete
-        if col == 0:
-            return False
-        return self.col_count[col - 1] == GRID_HEIGHT
-
     def has_block(col: byte) -> bool:
         """Check if column has a block."""
         row: byte
@@ -1592,21 +1580,16 @@ class Grid:
         src_offset: word
         dst_offset: word
 
-        # Shift columns RIGHT: copy from col-1 down to 0
-        # Each iteration: copy column c to column c+1
-        # Must process RIGHT to LEFT - blkcpy backward only works per-row, not per-column!
-        for c in range(col - 1, -1, -1):
+        # Shift columns RIGHT: copy col 1..(col-1) to col 2..col
+        # Skip col 0 (cannon) - if blocks reach there, game is already over
+        # Must process RIGHT to LEFT to avoid overwriting source
+        for c in range(col - 1, 0, -1):
             src_offset = row_offset_data[PLAY_TOP] + word(c) * BLOCK_WIDTH
             dst_offset = src_offset + BLOCK_WIDTH
             blkcpy(Screen.screen, src_offset, Screen.screen, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
             blkcpy(Screen.colors, src_offset, Screen.colors, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
-
-        # Shift col_count array right to match: columns 1..col-1 → 2..col
-        # col_count index = column - 1 (so column 1 = index 0)
-        # Must process right to left to avoid overwriting source values
-        for c in range(col - 1, 0, -1):
             self.col_count[c] = self.col_count[c - 1]
-        self.col_count[0] = 0  # Column 1 is now empty (cannon col has no blocks)
+        self.col_count[0] = 0  # Column 1 is now empty
 
 
 # =============================================================================
@@ -1895,9 +1878,9 @@ class Game:
         if self.effect_phase != 0 or self.cascade_phase != CASCADE_IDLE:
             return
 
-        # Find first complete column
-        for col in range(GRID_WIDTH):
-            if self.grid.is_column_complete(col):
+        # Find first complete column (skip col 0 = cannon)
+        for col in range(1, GRID_WIDTH):
+            if self.grid.col_count[col - 1] == GRID_HEIGHT:
                 self.effect_from_cascade = False  # Normal clear, no bonus
                 self.start_effect(col)
                 return
@@ -2117,9 +2100,9 @@ class Game:
         """Check for complete columns after cascade."""
         col: byte
 
-        # Look for complete columns
-        for col in range(GRID_WIDTH):
-            if self.grid.is_column_complete(col):
+        # Look for complete columns (skip col 0 = cannon)
+        for col in range(1, GRID_WIDTH):
+            if self.grid.col_count[col - 1] == GRID_HEIGHT:
                 # Found complete column - start column effect
                 # Cascade will resume after column effect completes
                 self.cascade_phase = CASCADE_IDLE
@@ -2530,7 +2513,7 @@ class Game:
         # Note: Use explicit read-modify-write because PyCo doesn't support += on subscripts
         if hit_col > 0:
             idx = hit_col - 1
-            self.grid.col_count[idx] = self.grid.col_count[idx] + 1
+            self.grid.col_count[idx] += self.grid.col_count[idx]
 
         # Hit column 0 means block placed in cannon column - game over!
         # This means the row is completely blocked - immediate game over!
@@ -3251,21 +3234,21 @@ class DonateScreen:
         # QR code position: right side of screen (col 15 = 40-25)
         # Bitstream format: 625 bits continuous in 79 bytes, MSB first
         # Bit=1 -> $20 (black/BG0), Bit=0 -> $60 (white/BG1)
-        # data_byte = qr_donate_data[0]
-        # for row in range(25):
-        #     pos = row_offset_data[row] + 15
-        #     for col in range(25):
-        #         if data_byte & bit_mask:
-        #             c = CHAR_SPACE + BG_PLAY
-        #         else:
-        #             c = CHAR_SPACE + BG_HIGHLIGHT
-        #         Screen.screen[pos] = c +
-        #         pos += 1
-        #         bit_mask = bit_mask >> 1
-        #         if bit_mask == 0:
-        #             bit_mask = 0x80
-        #             byte_idx += 1
-        #             data_byte = qr_donate_data[byte_idx]
+        data_byte = qr_donate_data[0]
+        for row in range(25):
+            pos = row_offset_data[row] + 15
+            for col in range(25):
+                if data_byte & bit_mask:
+                    c = CHAR_SPACE + BG_PLAY
+                else:
+                    c = CHAR_SPACE + BG_HIGHLIGHT
+                Screen.screen[pos] = c
+                pos += 1
+                bit_mask = bit_mask >> 1
+                if bit_mask == 0:
+                    bit_mask = 0x80
+                    byte_idx += 1
+                    data_byte = qr_donate_data[byte_idx]
 
     def draw():
         """Draw donate screen content (left side text)."""
@@ -3289,7 +3272,7 @@ class DonateScreen:
         Screen.sync_raster(IRQ_RASTER_BOTTOM)
         Screen.set_game_mode()
         # Draw content
-        # self.draw_qr()
+        self.draw_qr()
         self.draw()
         # Wait for keypress
         press_a_key(1, 22)
@@ -3324,7 +3307,6 @@ def about_screen():
 def donate_screen():
     donate_screen: DonateScreen
     donate_screen()
-    pass
 
 
 def game():
