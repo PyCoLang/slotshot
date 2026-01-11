@@ -37,12 +37,11 @@ CIA1_ICR = 0xDC0D
 # Work buffer memory - use $0400 area (default screen RAM, safe from stack!)
 # VIC Bank 3 uses $C400 for screen, so $0400-$07FF is free for buffers
 COLUMN_BUFFER_ADDR = 0x0400   # 40 bytes for column blit buffer ($0400-$0427)
-COLUMN_POOL_ADDR = 0x0428     # 640 bytes for pre-generated column patterns ($0428-$06A7)
+COLUMN_POOL_ADDR = 0x0428     # 960 bytes for pre-generated column patterns ($0428-$07E7)
 
 # Column pool configuration
-# IMPORTANT: Use power-of-2 sizes to avoid modulo bias and enable fast bitmask!
-COLUMN_POOL_SIZE = 64         # Number of pre-generated column patterns (64 * 10 = 640 bytes)
-COLUMN_POOL_MASK = 63         # Bitmask for fast random selection (0x3F)
+COLUMN_POOL_SIZE = 87         # Number of pre-generated column patterns (87 * 11 = 957 bytes)
+COLUMN_ENTRY_SIZE = 11        # Bytes per entry: 1 block count + 10 row colors
 MAX_HOLES = 4                 # Maximum holes per column (1-4 random)
 MAX_HOLES_MASK = 3            # Bitmask for holes (0-3, then +1 = 1-4)
 
@@ -210,6 +209,8 @@ INITIAL_COLUMNS = 7         # Number of columns to spawn at game start
 INITIAL_SCORE = 9           # Starting score (each shot costs 1 point)
 
 # Raster position for sprite updates
+IRQ_RASTER_TOP = 10
+IRQ_RASTER_MUSIC = 120
 IRQ_RASTER_PLAY_AREA_BOTTOM = 226         # Sprite updates (timing not critical)
 IRQ_RASTER_BOTTOM = 250
 
@@ -339,8 +340,8 @@ SPARKLE_BLOCK = 3          # Block 3: sparkle ($C0C0)
 STAR_BLOCK = 4             # Block 4: star ($C100) - used for title screen stars
 
 # Sparkle effect constants
-SPARKLE_PHASE_MAX = 4       # Color fade phases (1=dark, 2=light, 3=dark again)
-SPARKLE_SPAWN_CHANCE = 220  # Higher = rarer (200 ≈ 22% per frame when free)
+SPARKLE_PHASE_MAX = 3       # Color fade phases (1=dark, 2=light, 3=dark again)
+SPARKLE_SPAWN_CHANCE = 210  # Higher = rarer (200 ≈ 22% per frame when free)
 
 # =============================================================================
 # SHARED ZERO PAGE VARIABLES (IRQ <-> Main loop communication)
@@ -350,9 +351,9 @@ SPARKLE_SPAWN_CHANCE = 220  # Higher = rarer (200 ≈ 22% per frame when free)
 ZP_BULLET_ACTIVE = 0x2A    # byte: 0=inactive, 1=active
 ZP_BULLET_X = 0x2B         # word: bullet X position (16-bit, 2 bytes)
 ZP_BULLET_Y = 0x2D         # byte: bullet Y position (pixels)
-ZP_BULLET_HIT = 0x2E       # byte: 0=flying, 1=hit (edge or block)
-ZP_BULLET_ROW = 0x2F       # byte: grid row at time of firing (0-9, fixed!)
-ZP_BULLET_HIT_COL = 0x36   # byte: grid column of collision (GRID_WIDTH = edge hit)
+ZP_BULLET_ROW = 0x2E       # byte: grid row at time of firing (0-9, fixed!)
+ZP_BULLET_ROW_BASE = 0x4C  # word: row_offset for bullet_row (cached at fire time) - IRQ optimization
+ZP_BULLET_HIT_COL = 0x36   # byte: 255=no hit, 0-19=hit column (0=game over)
 
 # Cannon state variables
 ZP_CANNON_TARGET_Y = 0x30  # byte: target Y position (pixels)
@@ -395,11 +396,6 @@ ZP_YELLOW_STATE = 0x3C     # byte: yellow bullet state (0=in wall, 1=in empty)
 ZP_YELLOW_LAST_EMPTY = 0x3D # byte: last empty column found by yellow bullet
 
 ZP_MENU_SELECTED = 0x49    # byte: selected menu item (0-3)
-
-# =============================================================================
-# Mapped memory addresses
-# =============================================================================
-
 
 # =============================================================================
 # CASCADE STATE MACHINE CONSTANTS
@@ -793,13 +789,14 @@ def joy_handler():
 @irq
 def irq_handler(vic: byte, cia1: byte):
     """Raster IRQ - updates sprite positions and reads joystick every frame."""
+    raster: byte[VIC_RASTER]
+
     # ZP variables for sprite state (shared with main loop)
     target_y: byte[ZP_CANNON_TARGET_Y]
     current_y: byte[ZP_CANNON_CURRENT_Y]
     bullet_active: byte[ZP_BULLET_ACTIVE]
     bullet_x: word[ZP_BULLET_X]
     bullet_y: byte[ZP_BULLET_Y]
-    bullet_hit: byte[ZP_BULLET_HIT]
     bullet_hit_col: byte[ZP_BULLET_HIT_COL]
     sprite_en: byte[ZP_SPRITE_ENABLE]
     star_mask: byte[ZP_STAR_MASK]
@@ -827,7 +824,7 @@ def irq_handler(vic: byte, cia1: byte):
     next_x: word
     screen_x: byte
     grid_col: byte
-    screen_y: byte
+    row_base: word[ZP_BULLET_ROW_BASE]  # Cached row offset (set at fire time!)
     pos: word
     color: byte
     collision: byte
@@ -858,6 +855,13 @@ def irq_handler(vic: byte, cia1: byte):
         # Acknowledge VIC interrupt
         vic = 0x01
 
+        if raster >= IRQ_RASTER_MUSIC and raster <= IRQ_RASTER_PLAY_AREA_BOTTOM:
+            raster = IRQ_RASTER_PLAY_AREA_BOTTOM
+            music_tick()
+            return
+
+        raster = IRQ_RASTER_MUSIC
+
         # --- Update cannon position (smooth interpolation) ---
         if current_y < target_y:
             current_y += 4
@@ -879,33 +883,35 @@ def irq_handler(vic: byte, cia1: byte):
 
             # Check right edge first (328 = 344 - 16 visible sprite width)
             if next_x > 328:
-                # Edge hit - handle differently for yellow bullet
-                bullet_hit = 1
+                # Edge hit - bullet_hit_col will be set below based on bullet type
                 bullet_active = 0
                 collision = 1
                 sfx_play_hit()
                 sprite_en = sprite_en & 0xFD
                 sprite_enable = sprite_en | star_mask
 
-                screen_y = PLAY_TOP + bullet_row * BLOCK_HEIGHT
-
                 # Edge reached - place block based on bullet type and state
-                bullet_hit_col = GRID_WIDTH
+                # NOTE: row_base is pre-calculated at fire time (avoids tuple lookup!)
+                # bullet_hit_col = actual column where block is placed!
 
                 if bullet_type == COLOR_BULLET_YELLOW:
                     # Yellow bullet: check state for placement
                     if yellow_state == YELLOW_STATE_AS_WHITE:
                         # AS_WHITE: no gap exists, place at edge (like white)
-                        pos = row_offset_data[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
+                        bullet_hit_col = GRID_WIDTH - 1
+                        pos = row_base + 38  # (GRID_WIDTH - 1) * BLOCK_WIDTH = 19 * 2
                     elif yellow_last_empty < GRID_WIDTH:
                         # IN_EMPTY/BEFORE_WALL: use last empty (the gap position)
-                        pos = row_offset_data[screen_y] + word(yellow_last_empty) * BLOCK_WIDTH
+                        bullet_hit_col = yellow_last_empty
+                        pos = row_base + (word(yellow_last_empty) << 1)
                     else:
                         # No empty found (0xFF) - place at edge
-                        pos = row_offset_data[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
+                        bullet_hit_col = GRID_WIDTH - 1
+                        pos = row_base + 38  # (GRID_WIDTH - 1) * BLOCK_WIDTH = 19 * 2
                 else:
                     # White/Blue bullet: always place at edge
-                    pos = row_offset_data[screen_y] + word(GRID_WIDTH - 1) * BLOCK_WIDTH
+                    bullet_hit_col = GRID_WIDTH - 1
+                    pos = row_base + 38  # (GRID_WIDTH - 1) * BLOCK_WIDTH = 19 * 2
                 # Place block with bullet's color (bullet_type IS the color!)
                 color_ram[pos] = bullet_type
                 color_ram[pos + 1] = bullet_type
@@ -918,8 +924,8 @@ def irq_handler(vic: byte, cia1: byte):
 
                 if grid_col < GRID_WIDTH:
                     # Calculate Color RAM position (top-left of 2x2 block)
-                    screen_y = PLAY_TOP + bullet_row * BLOCK_HEIGHT
-                    pos = row_offset_data[screen_y] + word(grid_col) * BLOCK_WIDTH
+                    # NOTE: row_base is pre-calculated at fire time (avoids tuple lookup!)
+                    pos = row_base + (word(grid_col) << 1)
 
                     # Check ALL 4 corners of the block!
                     color = (color_ram[pos] | color_ram[pos + 1] | color_ram[pos + 40] | color_ram[pos + 41]) & 0x0F
@@ -928,9 +934,7 @@ def irq_handler(vic: byte, cia1: byte):
                     # All three behave the same: stop at first wall, place block before it
                     if bullet_type != COLOR_BULLET_YELLOW or yellow_state == YELLOW_STATE_AS_WHITE:
                         if color != BLACK:
-                            # Block hit! Stop here
-                            bullet_hit = 1
-                            bullet_hit_col = grid_col
+                            # Block hit! bullet_hit_col set below
                             bullet_active = 0
                             collision = 1
                             sfx_play_hit()
@@ -939,11 +943,15 @@ def irq_handler(vic: byte, cia1: byte):
 
                             if grid_col > 0:
                                 # Place block with bullet's color (bullet_type IS the color!)
-                                pos = row_offset_data[screen_y] + word(grid_col - 1) * BLOCK_WIDTH
+                                bullet_hit_col = grid_col - 1  # Block placed BEFORE collision!
+                                pos = row_base + (word(grid_col - 1) << 1)
                                 color_ram[pos] = bullet_type
                                 color_ram[pos + 1] = bullet_type
                                 color_ram[pos + 40] = bullet_type
                                 color_ram[pos + 41] = bullet_type
+                            else:
+                                # grid_col == 0: collision in col 0, no block placed (game over!)
+                                bullet_hit_col = 0
 
                     # === YELLOW BULLET: State machine (BEFORE_WALL, IN_WALL, IN_EMPTY) ===
                     elif yellow_state == YELLOW_STATE_BEFORE_WALL:
@@ -963,8 +971,7 @@ def irq_handler(vic: byte, cia1: byte):
                         # YELLOW_STATE_IN_EMPTY - in gap, looking for end
                         if color != BLACK:
                             # Wall after gap - STOP and place block at last empty!
-                            bullet_hit = 1
-                            bullet_hit_col = grid_col
+                            bullet_hit_col = yellow_last_empty  # Block placed at gap position!
                             bullet_active = 0
                             collision = 1
                             sfx_play_hit()
@@ -973,7 +980,7 @@ def irq_handler(vic: byte, cia1: byte):
 
                             # Place block at last empty position (bullet_type IS the color!)
                             if yellow_last_empty < GRID_WIDTH:
-                                pos = row_offset_data[screen_y] + word(yellow_last_empty) * BLOCK_WIDTH
+                                pos = row_base + (word(yellow_last_empty) << 1)
                                 color_ram[pos] = bullet_type
                                 color_ram[pos + 1] = bullet_type
                                 color_ram[pos + 40] = bullet_type
@@ -995,9 +1002,9 @@ def irq_handler(vic: byte, cia1: byte):
                     sprite_x_msb = sprite_x_msb & 0xFD
         else:
             # Bullet not active - sprite 1 follows cannon (loaded inside barrel)
-            # BUT: Don't move sprite back if collision just happened (bullet_hit != 0)
+            # BUT: Don't move sprite back if collision just happened (bullet_hit_col != 255)
             # This prevents the "flash back to cannon" glitch before main loop hides the sprite
-            if bullet_hit == 0:
+            if bullet_hit_col == 255:
                 sprite_x1 = CANNON_SPRITE_X
                 sprite_y1 = current_y
                 sprite_x_msb = sprite_x_msb & 0xFD  # Clear bit 1 (X < 256)
@@ -1027,8 +1034,6 @@ def irq_handler(vic: byte, cia1: byte):
                     sprite_en = sprite_en & 0xFB  # Clear bit 2
                     sprite_enable = sprite_en | star_mask
 
-        # Play music
-        music_tick()
         return
 
     # --- CIA1 Timer A (always 60 Hz, platform independent!) ---
@@ -1111,7 +1116,7 @@ def irq_title_handler(vic: byte, cia1: byte):
 
 
 @irq
-@relocate(0x33C)
+@relocate(0xC140)
 def irq_screen_handler(vic: byte, cia1: byte):
     """Screen IRQ handler."""
     if vic & 0x01:
@@ -1259,7 +1264,7 @@ class Screen:
 
     def print_center(y: byte, text: alias[string], col: byte, bg: byte):
         """Print text centered at the given y position."""
-        self.print_center_at_offset(y, text, col, bg, 0)
+        self.print_at(20 - len(text) / 2, y, text, col, bg)
 
     def print_number(x: byte, y: byte, num: word, digits: byte, col: byte, bg: byte):
         """Print number with ECM background select."""
@@ -1390,7 +1395,6 @@ class Random:
         # floor(next * max / 256) - avoids modulo bias!
         return byte(word(self.next()) * max_val >> 8)
 
-    @relocate(0xC140)
     def range_mask(mask: byte) -> byte:
         """FAST! Use for power-of-2 ranges: range_mask(0x1F) = 0-31"""
         return self.next() & mask
@@ -1410,20 +1414,30 @@ class HighScore:
 # GRID CLASS - Block management (Color RAM only)
 # =============================================================================
 
+class XY:
+    """Screen coordinates for dying blocks. x=screen column (0-38), y=screen row (0-24)."""
+    x: byte
+    y: byte
+
+
 class Grid:
     """
     Block management
     Color RAM is the single source of truth.
     """
-    # Pre-generated column patterns (10 bytes each, size from COLUMN_POOL_SIZE)
-    column_pool: array[byte, COLUMN_POOL_SIZE * GRID_HEIGHT][COLUMN_POOL_ADDR]
+    # Pre-generated column patterns (11 bytes each: 1 count + 10 colors)
+    column_pool: array[byte, COLUMN_POOL_SIZE * COLUMN_ENTRY_SIZE][COLUMN_POOL_ADDR]
 
-    # Dying blocks animation - stores screen positions of blocks that will fade out
+    # Block count per column (1-19, index 0 = column 1)
+    # Updated on: spawn, bullet hit, shift, cascade
+    col_count: array[byte, 19] = 0
+
+    # Dying blocks animation - stores screen XY of blocks that will fade out
     # Max 40 blocks (4 columns * 10 rows = worst case in one scroll cycle)
-    dying_positions: array[word, 40]
+    dying_positions: array[XY, 40]
     dying_count: byte = 0
 
-    def init_pool():
+    def __init__():
         """Pre-generate column patterns at startup."""
         col: byte
         row: byte
@@ -1431,11 +1445,14 @@ class Grid:
         h: byte
         hole_pos: byte
         color: byte
+        block_count: byte
         offset: word = 0
         ro: word
+        pos: word
 
         for col in range(COLUMN_POOL_SIZE):
-            ro = offset
+            # Skip first byte (will store count later)
+            ro = offset + 1
 
             # Fill column with random colors (FAST bitmask - no modulo!)
             for row in range(GRID_HEIGHT):
@@ -1443,13 +1460,19 @@ class Grid:
                 self.column_pool[ro] = color
                 ro += 1
 
-            # Add 1-4 random holes (FAST bitmask for hole count)
+            # Add 1-4 random holes AND count blocks in one pass
+            # Start with full count, decrement only when creating NEW hole (handles overlaps!)
             holes = Random.range_mask(MAX_HOLES_MASK) + 1
+            block_count = GRID_HEIGHT
             for h in range(holes):
                 hole_pos = Random.range(GRID_HEIGHT)  # 10 = not power-of-2, use modulo
-                self.column_pool[offset + word(hole_pos)] = BLACK
+                pos = offset + 1 + word(hole_pos)
+                if self.column_pool[pos] != BLACK:  # Only count if not already a hole
+                    self.column_pool[pos] = BLACK
+                    block_count -= 1
+            self.column_pool[offset] = block_count
 
-            offset += 10
+            offset += COLUMN_ENTRY_SIZE
 
     def get_color(col: byte, row: byte) -> byte:
         """
@@ -1458,16 +1481,27 @@ class Grid:
         """
         return Screen.colors[row_offset_data[PLAY_TOP + row * BLOCK_HEIGHT] + (col * BLOCK_WIDTH)] & 0x0F
 
+    def shift_col_count_left():
+        """Shift col_count array LEFT by 1 (columns scroll left, count follows)."""
+        i: byte
+        for i in range(18):
+            self.col_count[i] = self.col_count[i + 1]
+        self.col_count[18] = 0  # Rightmost becomes empty, spawn_column() will set it
+
     def spawn_column():
         """
         Pick random column from pool and blit directly to Color RAM.
         Uses 4 blkcpy calls with dual-stride for 2x2 block expansion.
+        Also updates Game.col_count[18] with pre-calculated block count.
         """
         pool_offset: word
         offset: word
 
-        # Pick random column from pool (FAST bitmask - no modulo bias!)
-        pool_offset = word(Random.range_mask(COLUMN_POOL_MASK)) * 10
+        # Pick random column from pool (unbiased multiplication-based range)
+        pool_offset = word(Random.range(COLUMN_POOL_SIZE)) * COLUMN_ENTRY_SIZE
+
+        # Read pre-calculated block count and store for rightmost column (index 18)
+        self.col_count[18] = self.column_pool[pool_offset]
 
         # Calculate Color RAM offset for rightmost column (chars 38-39)
         offset = row_offset_data[PLAY_TOP] + 38
@@ -1476,15 +1510,16 @@ class Grid:
         # src_stride=1 (pool bytes are consecutive)
         # dst_stride=80 (2 screen rows = 80 bytes between blocks)
         # width=1, height=10 (10 blocks)
+        # NOTE: pool_offset + 1 skips the count byte
 
         # Top-left corner of each block
-        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, offset, 80, 1, 10)
+        blkcpy(self.column_pool, pool_offset + 1, 1, Screen.colors, offset, 80, 1, 10)
         # Top-right corner
-        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, offset + 1, 80, 1, 10)
+        blkcpy(self.column_pool, pool_offset + 1, 1, Screen.colors, offset + 1, 80, 1, 10)
         # Bottom-left corner (+40 = next screen row)
-        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, offset + 40, 80, 1, 10)
+        blkcpy(self.column_pool, pool_offset + 1, 1, Screen.colors, offset + 40, 80, 1, 10)
         # Bottom-right corner
-        blkcpy(self.column_pool, pool_offset, 1, Screen.colors, offset + 41, 80, 1, 10)
+        blkcpy(self.column_pool, pool_offset + 1, 1, Screen.colors, offset + 41, 80, 1, 10)
 
     def age_player_blocks():
         """
@@ -1499,6 +1534,7 @@ class Grid:
         color: byte
         row: byte
         col: byte
+        xy: alias[XY]
 
         # Reset dying list at start of each age cycle
         self.dying_count = 0
@@ -1513,7 +1549,9 @@ class Grid:
                 # DARK_GREY → dying animation (special case)
                 if color == DARK_GREY:
                     if self.dying_count < 40:
-                        self.dying_positions[self.dying_count] = pos
+                        alias(xy, addr(self.dying_positions[self.dying_count]))
+                        xy.x = byte(col * BLOCK_WIDTH)
+                        xy.y = byte(PLAY_TOP + row * BLOCK_HEIGHT)
                         self.dying_count += 1
                     continue
 
@@ -1529,12 +1567,11 @@ class Grid:
                 Screen.colors[pos + 41] = color
 
     def is_column_complete(col: byte) -> bool:
-        """Check if column is complete (all rows have blocks) - Color RAM based."""
-        row: byte
-        for row in range(GRID_HEIGHT):
-            if not self.get_color(col, row):
-                return False
-        return True
+        """Check if column is complete (all rows have blocks) - O(1) using col_count."""
+        # Column 0 is cannon, never complete
+        if col == 0:
+            return False
+        return self.col_count[col - 1] == GRID_HEIGHT
 
     def has_block(col: byte) -> bool:
         """Check if column has a block."""
@@ -1548,6 +1585,7 @@ class Grid:
         """
         Shift columns 0..(col-1) one position to the RIGHT, overwriting column 'col'.
         This "pushes back" the blocks, giving the player more space!
+        Also updates col_count array to match shifted columns.
         NOTE: Flash effect is handled by Game.update_effect() state machine.
         """
         c: byte
@@ -1562,6 +1600,13 @@ class Grid:
             dst_offset = src_offset + BLOCK_WIDTH
             blkcpy(Screen.screen, src_offset, Screen.screen, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
             blkcpy(Screen.colors, src_offset, Screen.colors, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
+
+        # Shift col_count array right to match: columns 1..col-1 → 2..col
+        # col_count index = column - 1 (so column 1 = index 0)
+        # Must process right to left to avoid overwriting source values
+        for c in range(col - 1, 0, -1):
+            self.col_count[c] = self.col_count[c - 1]
+        self.col_count[0] = 0  # Column 1 is now empty (cannon col has no blocks)
 
 
 # =============================================================================
@@ -1624,9 +1669,9 @@ class Game:
     bullet_active_zp: byte[ZP_BULLET_ACTIVE]
     bullet_x_zp: irq_safe[word[ZP_BULLET_X]]
     bullet_y_zp: byte[ZP_BULLET_Y]
-    bullet_hit_zp: byte[ZP_BULLET_HIT]
     bullet_hit_col_zp: byte[ZP_BULLET_HIT_COL]
     bullet_row_zp: byte[ZP_BULLET_ROW]  # Grid row at firing time (fixed!)
+    bullet_row_base_zp: word[ZP_BULLET_ROW_BASE]  # Row offset (cached for IRQ!)
     sprite_en_zp: byte[ZP_SPRITE_ENABLE]
     star_mask_zp: byte[ZP_STAR_MASK]
 
@@ -1858,11 +1903,12 @@ class Game:
                 return
 
     def update_col_num():
-        """Update the column number and store active column count."""
-        col: byte
+        """Update the column number using col_count array (O(19) RAM reads vs O(200) Color RAM reads)."""
+        i: byte
         n: byte = 0
-        for col in range(GRID_WIDTH - 1, -1, -1):
-            if self.grid.has_block(col):
+        # col_count[i] = block count for column i+1 (columns 1-19)
+        for i in range(19):
+            if self.grid.col_count[i] != 0:
                 n += 1
 
         # Store for slide sound decision
@@ -1966,6 +2012,12 @@ class Game:
         start_char: byte
         end_char: byte
         current_step: byte
+        col: byte
+        idx: byte
+        row_base: word
+        pos_next: word
+        has_block_now: bool
+        had_block_before: bool
 
         # Move every 2 frames for smooth animation
         if self.cascade_frame % 2 != 0:
@@ -1977,6 +2029,35 @@ class Game:
 
         # Check if slide complete (2 character steps = 1 block)
         if current_step >= 2:
+            # Update col_count for EVERY column in the slide range
+            # The slide moved everything 1 column right, so:
+            # - AFTER col[i] = BEFORE col[i-1]
+            # - BEFORE col[i] had block ↔ AFTER col[i+1] has block
+            sy = PLAY_TOP + self.cascade_row * BLOCK_HEIGHT
+            row_base = row_offset_data[sy]
+
+            col = self.cascade_src_col
+            while col <= self.cascade_dst_col:
+                if col > 0:
+                    src_pos = row_base + word(col) * BLOCK_WIDTH
+                    has_block_now = (Screen.colors[src_pos] & 0x0F) != BLACK
+
+                    # What was BEFORE at col[i]? = What is AFTER at col[i+1]
+                    if col < self.cascade_dst_col:
+                        pos_next = row_base + word(col + 1) * BLOCK_WIDTH
+                        had_block_before = (Screen.colors[pos_next] & 0x0F) != BLACK
+                    else:
+                        # dst column: was empty before (first empty slot)
+                        had_block_before = False
+
+                    # Update col_count based on change
+                    idx = col - 1
+                    if has_block_now and not had_block_before:
+                        self.grid.col_count[idx] = self.grid.col_count[idx] + 1
+                    elif not has_block_now and had_block_before:
+                        self.grid.col_count[idx] = self.grid.col_count[idx] - 1
+                col += 1
+
             self.cascade_phase = CASCADE_SETTLE
             self.cascade_frame = 0
             return
@@ -2134,6 +2215,11 @@ class Game:
             if self.effect_phase > 7:
                 self.effect_phase = 0
 
+                # FIRST: Clear the removed column's col_count (it's now empty!)
+                # This must happen BEFORE shift check, otherwise infinite loop occurs
+                if self.effect_col > 0:
+                    self.grid.col_count[self.effect_col - 1] = 0
+
                 # Only shift columns if there are blocks to the left of the removed column
                 # Formula: if (GRID_WIDTH - effect_col) < active_col_count, there are blocks to the left
                 # This saves CPU time by skipping unnecessary blkcpy calls when nothing would move
@@ -2174,10 +2260,15 @@ class Game:
         """
         Animate dying blocks through DYING_COLORS phases.
         Called every frame, runs independently of other animations.
+        When animation completes (blocks turn BLACK), col_count is decremented
+        for each dying block to keep the count accurate.
         """
         i: byte
         pos: word
         color: byte
+        col: byte
+        idx: byte
+        xy: XY
 
         # No dying blocks?
         if self.grid.dying_count == 0:
@@ -2192,7 +2283,8 @@ class Game:
 
         # Apply color to all dying blocks
         for i in range(self.grid.dying_count):
-            pos = self.grid.dying_positions[i]
+            xy = self.grid.dying_positions[i]
+            pos = row_offset_data[xy.y] + xy.x
             Screen.colors[pos] = color
             Screen.colors[pos + 1] = color
             Screen.colors[pos + 40] = color
@@ -2206,6 +2298,13 @@ class Game:
 
             # Animation complete? (tuple length determines phase count)
             if self.dying_phase > len(dying_colors_data):
+                # Decrement col_count for each dying block that just turned BLACK
+                for i in range(self.grid.dying_count):
+                    xy = self.grid.dying_positions[i]
+                    col = xy.x >> 1  # Screen x to grid column (no modulo needed!)
+                    if col > 0:  # Not the cannon column
+                        idx = col - 1
+                        self.grid.col_count[idx] = self.grid.col_count[idx] - 1
                 self.dying_phase = 0
                 self.grid.dying_count = 0  # Clear the dying list
 
@@ -2251,7 +2350,7 @@ class Game:
         self.cannon_target_zp = PLAY_TOP * 8 + 4 * 16 + SPRITE_Y_OFFSET
         self.cannon_current_zp = self.cannon_target_zp
         self.bullet_active_zp = 0
-        self.bullet_hit_zp = 0
+        self.bullet_hit_col_zp = 255
         self.sprite_en_zp = 0x03  # Enable cannon + bullet only (stars managed by star_mask_zp)
 
         # Enable both sprites (bullet sprite always visible, follows cannon when not fired)
@@ -2368,10 +2467,14 @@ class Game:
 
         # Set bullet ZP variables (store cannon row at firing time!)
         # CRITICAL: Set active flag LAST! IRQ checks this first before using other values.
+        # NOTE: Do NOT reset bullet_hit_col_zp here! If there's a pending hit from the
+        # previous bullet, handle_bullet_hit() must process it first. The reset happens
+        # inside handle_bullet_hit() after processing.
         self.bullet_x_zp = start_x
         self.bullet_y_zp = start_y
-        self.bullet_hit_zp = 0
         self.bullet_row_zp = self.cannon_row_zp  # Lock in the row!
+        # Pre-calculate row base for IRQ (avoids tuple lookup every frame!)
+        self.bullet_row_base_zp = row_offset_data[PLAY_TOP + self.cannon_row_zp * BLOCK_HEIGHT]
         self.bullet_active_zp = 1  # Enable AFTER all values are set!
 
         # Enable bullet sprite (may have been hidden by collision in IRQ)
@@ -2413,16 +2516,23 @@ class Game:
             self.fire_bullet()
 
     def handle_bullet_hit():
-        """Handle bullet hit - IRQ places blocks, we just do housekeeping."""
+        """Handle bullet hit - IRQ places blocks and returns placed column, we update col_count."""
         hit_col: byte
+        idx: byte
 
-        if self.bullet_hit_zp == 0:
+        if self.bullet_hit_col_zp == 255:
             return
 
-        self.bullet_hit_zp = 0
-        hit_col = self.bullet_hit_col_zp
+        hit_col = self.bullet_hit_col_zp  # Read BEFORE reset!
+        self.bullet_hit_col_zp = 255      # Reset to "no hit"
 
-        # Hit column 0 means no block was placed - bullet hit a block in col 0!
+        # Update block count for placed column (column 1 = index 0)
+        # Note: Use explicit read-modify-write because PyCo doesn't support += on subscripts
+        if hit_col > 0:
+            idx = hit_col - 1
+            self.grid.col_count[idx] = self.grid.col_count[idx] + 1
+
+        # Hit column 0 means block placed in cannon column - game over!
         # This means the row is completely blocked - immediate game over!
         if hit_col == 0:
             # Check if there's actually a block in col 0 (game over condition)
@@ -2447,18 +2557,6 @@ class Game:
                 # NOW determine next bullet type (indicator shows what comes AFTER loaded one)
                 self.determine_next_bullet()
             return
-
-        # If bullet hit col 1, the block was placed in col 0 - immediate game over!
-        if hit_col == 1:
-            if self.is_game_over():
-                # Switch to empty cannon sprite - the killer block shows through!
-                Screen.sprite_ptr[0] = CANNON_BLOCK_FIRED
-                # Hide bullet sprite for game over screen
-                self.sprite_en_zp = self.sprite_en_zp & 0xFD
-                Screen.sprite_enable = self.sprite_en_zp | self.star_mask_zp
-                self.game_over = True
-                self.running = False
-                return
 
         # Check for complete columns
         self.check_complete_columns()
@@ -2531,10 +2629,11 @@ class Game:
 
         __sei__()  # Disable IRQ for entire atomic sequence
 
-        # 1. Scroll play area left
+        # 1. Scroll play area left (Color RAM + col_count array)
         blkcpy(Screen.colors, 82, Screen.colors, 80, 38, 20, 40)
+        self.grid.shift_col_count_left()
 
-        # 2. Spawn new column directly to Color RAM
+        # 2. Spawn new column directly to Color RAM (sets col_count[18])
         self.grid.spawn_column()
 
         # 3. Adjust bullet position to match shifted grid
@@ -2544,6 +2643,13 @@ class Game:
             else:
                 self.bullet_active_zp = 0
                 Screen.sprite_ptr[0] = CANNON_BLOCK_READY
+
+        # 4. Adjust pending bullet hit column (IRQ may have set this BEFORE scroll!)
+        # The grid shifted left, so the hit column is now 1 less
+        # 255=no hit (skip), 0=game over (skip), 1-19=valid (decrement)
+        if self.bullet_hit_col_zp > 0 and self.bullet_hit_col_zp < GRID_WIDTH:
+            self.bullet_hit_col_zp = self.bullet_hit_col_zp - 1
+
         __cli__()  # NOW IRQ can run - grid and bullet_x are synchronized!
 
         # === END ATOMIC SEQUENCE ===
@@ -2792,12 +2898,13 @@ class Game:
         __enable_raster_irq__(IRQ_RASTER_PLAY_AREA_BOTTOM)
 
         # Initialize column pool (pre-generate random patterns)
-        self.grid.init_pool()
+        self.grid()
 
         # Spawn initial columns to start with a populated grid
         # NOTE: scroll first, then spawn - so the last column stays at col 19
         for _ in range(INITIAL_COLUMNS):
             blkcpy(Screen.colors, 82, Screen.colors, 80, 38, 20, 40)
+            self.grid.shift_col_count_left()  # Match Color RAM scroll
             self.grid.spawn_column()
 
         # Wait for music to stop
@@ -3046,7 +3153,6 @@ class TitleScreen:
         Sprites.init_stars(title_star_positions_data, STAR_COLOR)
 
 
-
 class StoryScreen:
     """Story screen - displays game backstory."""
     def draw():
@@ -3140,26 +3246,26 @@ class DonateScreen:
         byte_idx: byte = 0
         bit_mask: byte = 0x80
         data_byte: byte
-        char: byte
+        c: byte
 
         # QR code position: right side of screen (col 15 = 40-25)
         # Bitstream format: 625 bits continuous in 79 bytes, MSB first
         # Bit=1 -> $20 (black/BG0), Bit=0 -> $60 (white/BG1)
-        data_byte = qr_donate_data[0]
-        for row in range(25):
-            pos = row_offset_data[row] + 15
-            for col in range(25):
-                if data_byte & bit_mask:
-                    char = CHAR_SPACE + BG_PLAY
-                else:
-                    char = CHAR_SPACE + BG_HIGHLIGHT
-                Screen.screen[pos] = char
-                pos += 1
-                bit_mask = bit_mask >> 1
-                if bit_mask == 0:
-                    bit_mask = 0x80
-                    byte_idx += 1
-                    data_byte = qr_donate_data[byte_idx]
+        # data_byte = qr_donate_data[0]
+        # for row in range(25):
+        #     pos = row_offset_data[row] + 15
+        #     for col in range(25):
+        #         if data_byte & bit_mask:
+        #             c = CHAR_SPACE + BG_PLAY
+        #         else:
+        #             c = CHAR_SPACE + BG_HIGHLIGHT
+        #         Screen.screen[pos] = c +
+        #         pos += 1
+        #         bit_mask = bit_mask >> 1
+        #         if bit_mask == 0:
+        #             bit_mask = 0x80
+        #             byte_idx += 1
+        #             data_byte = qr_donate_data[byte_idx]
 
     def draw():
         """Draw donate screen content (left side text)."""
@@ -3183,7 +3289,7 @@ class DonateScreen:
         Screen.sync_raster(IRQ_RASTER_BOTTOM)
         Screen.set_game_mode()
         # Draw content
-        self.draw_qr()
+        # self.draw_qr()
         self.draw()
         # Wait for keypress
         press_a_key(1, 22)
@@ -3218,6 +3324,7 @@ def about_screen():
 def donate_screen():
     donate_screen: DonateScreen
     donate_screen()
+    pass
 
 
 def game():
