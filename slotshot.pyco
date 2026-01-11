@@ -1,4 +1,4 @@
-# SlotShot - A Tetris-inspired shooter game for C64 (Optimized Version)
+# SlotShot - A fast-paced puzzle shooter for the Commodore 64
 # Controls: Joystick Port 2, W/S, or Up/Down to move cannon
 #           Fire button or SPACE to shoot
 # Fill the gaps to make columns disappear!
@@ -2355,9 +2355,6 @@ class Game:
         Screen.sprite_ptr[2] = SPARKLE_BLOCK      # Sparkle pattern
         sparkle_phase = 0  # Sparkle starts inactive
 
-        # DEBUG: All sprites in FRONT to test visibility
-        Screen.sprite_priority = 0x00  # All sprites in front (debug)
-
         # Initialize ZP variables
         self.cannon_row_zp = 4  # Start in middle
         self.cannon_target_zp = PLAY_TOP * 8 + 4 * 16 + SPRITE_Y_OFFSET
@@ -3364,7 +3361,7 @@ def main():
     slotshot_music_vic_init()
 
     while True:
-        # InitializeShow title screen and get menu selection
+        # Show title screen and get menu selection
         title_screen()
 
         if menu_choice == 0:
