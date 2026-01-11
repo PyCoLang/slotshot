@@ -430,6 +430,29 @@ row_offset_data: tuple[word] = (
     800, 840, 880, 920, 960
 )
 
+# aging lookup
+aging_lookup_data: tuple[byte] = (0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 12)
+
+# aging action lookup: 0=skip/continue, 1=age/continue, 2=dying/continue, 3=stop (original block)
+age_action_data: tuple[byte] = (
+    0,  # 0: BLACK - skip
+    1,  # 1: WHITE - age
+    3,  # 2: RED - stop
+    3,  # 3: CYAN - stop
+    3,  # 4: PURPLE - stop
+    3,  # 5: GREEN - stop
+    0,  # 6: BLUE - skip
+    0,  # 7: YELLOW - skip
+    3,  # 8: ORANGE - stop
+    3,  # 9: BROWN - stop
+    3,  # 10: LIGHT_RED - stop
+    2,  # 11: DARK_GREY - dying
+    1,  # 12: GREY - age
+    3,  # 13: LIGHT_GREEN - stop
+    3,  # 14: LIGHT_BLUE - stop
+    1   # 15: LIGHT_GREY - age
+)
+
 # Colors
 dying_colors_data: tuple[byte] = (GREY, LIGHT_GREY, GREY, LIGHT_GREY, GREY, WHITE, BLACK)
 block_colors_data: tuple[byte] = (RED, CYAN, PURPLE, GREEN, ORANGE, LIGHT_GREEN, LIGHT_BLUE, LIGHT_RED)
@@ -444,7 +467,7 @@ commodore_rainbow_data: tuple[byte] = (
 # QR code for donate screen - bitstream (79 bytes, 625 bits continuous)
 # Bit=1 -> black ($20), Bit=0 -> white ($60)
 # URL: https://bit.ly/slotshot
-qr_donate_data: tuple[byte] = (
+qr_donate_data: relocate[tuple[byte], 0x33C] = (
     0xFE, 0x64, 0xBF, 0xC1, 0x37, 0x90, 0x6E, 0xBC, 0xEB, 0xB7,
     0x5C, 0xC5, 0xDB, 0xA8, 0x2A, 0xEC, 0x14, 0x1D, 0x07, 0xFA,
     0xAA, 0xFE, 0x01, 0xF0, 0x00, 0xBE, 0x37, 0xBE, 0x36, 0xBD,
@@ -1427,9 +1450,10 @@ class Grid:
     # Pre-generated column patterns (11 bytes each: 1 count + 10 colors)
     column_pool: array[byte, COLUMN_POOL_SIZE * COLUMN_ENTRY_SIZE][COLUMN_POOL_ADDR]
 
-    # Block count per column (1-19, index 0 = column 1)
+    # Block count per column - 1-based indexing: col_count[col] for column col
+    # col_count[0] unused (dummy), col_count[1..19] for columns 1-19
     # Updated on: spawn, bullet hit, shift, cascade
-    col_count: array[byte, 19] = 0
+    col_count: array[byte, 20] = 0
 
     # Dying blocks animation - stores screen XY of blocks that will fade out
     # Max 40 blocks (4 columns * 10 rows = worst case in one scroll cycle)
@@ -1483,23 +1507,23 @@ class Grid:
     def shift_col_count_left():
         """Shift col_count array LEFT by 1 (columns scroll left, count follows)."""
         i: byte
-        for i in range(18):
+        for i in range(1, 19):
             self.col_count[i] = self.col_count[i + 1]
-        self.col_count[18] = 0  # Rightmost becomes empty, spawn_column() will set it
+        self.col_count[19] = 0  # Rightmost becomes empty, spawn_column() will set it
 
     def spawn_column():
         """
         Pick random column from pool and blit directly to Color RAM.
         Uses 4 blkcpy calls with dual-stride for 2x2 block expansion.
-        Also updates Game.col_count[18] with pre-calculated block count.
+        Also updates Game.col_count[19] with pre-calculated block count.
         """
         pool_offset: word
 
         # Pick random column from pool (unbiased multiplication-based range)
         pool_offset = word(Random.range(COLUMN_POOL_SIZE)) * COLUMN_ENTRY_SIZE
 
-        # Read pre-calculated block count and store for rightmost column (index 18)
-        self.col_count[18] = self.column_pool[pool_offset]
+        # Read pre-calculated block count and store for rightmost column (col 19)
+        self.col_count[19] = self.column_pool[pool_offset]
 
         pool_offset += 1  # skip the count byte
 
@@ -1521,12 +1545,15 @@ class Grid:
         Age player-placed blocks: WHITE → LIGHT_GREY → GREY → DARK_GREY.
         DARK_GREY blocks are added to dying list for flash animation.
         Called once per scroll, so blocks disappear after 4 scrolls.
+
+        Optimized: stops scanning a row when hitting an original block (RED, CYAN, etc.)
+        because the bullet couldn't have passed through it → no user blocks after it.
         """
-        # Aging lookup: index=color, value=next color (0=skip)
-        aging: tuple[byte] = (0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 12)
         base_pos: word
         pos: word
         color: byte
+        action: byte
+        new_color: byte
         row: byte
         col: byte
         xy: alias[XY]
@@ -1541,8 +1568,19 @@ class Grid:
                 pos = base_pos + word(col) * BLOCK_WIDTH
                 color = Screen.colors[pos] & 0x0F
 
-                # DARK_GREY → dying animation (special case)
-                if color == DARK_GREY:
+                # Lookup action: 0=skip, 1=age, 2=dying, 3=stop
+                action = age_action_data[color]
+
+                # Original block (RED, CYAN, etc.) - no user blocks can be after this
+                if action == 3:
+                    break
+
+                # Skip BLACK, BLUE, YELLOW
+                if action == 0:
+                    continue
+
+                # DARK_GREY → dying animation
+                if action == 2:
                     if self.dying_count < 40:
                         alias(xy, addr(self.dying_positions[self.dying_count]))
                         xy.x = byte(col * BLOCK_WIDTH)
@@ -1550,16 +1588,12 @@ class Grid:
                         self.dying_count += 1
                     continue
 
-                # Lookup next color (0 = not a player block, skip)
-                color = aging[color]
-                if color == 0:
-                    continue
-
-                # Update all 4 cells of the 2x2 block
-                Screen.colors[pos] = color
-                Screen.colors[pos + 1] = color
-                Screen.colors[pos + 40] = color
-                Screen.colors[pos + 41] = color
+                # Age user block (WHITE, GREY, LIGHT_GREY)
+                new_color = aging_lookup_data[color]
+                Screen.colors[pos] = new_color
+                Screen.colors[pos + 1] = new_color
+                Screen.colors[pos + 40] = new_color
+                Screen.colors[pos + 41] = new_color
 
     def has_block(col: byte) -> bool:
         """Check if column has a block."""
@@ -1580,16 +1614,15 @@ class Grid:
         src_offset: word
         dst_offset: word
 
-        # Shift columns RIGHT: copy col 1..(col-1) to col 2..col
-        # Skip col 0 (cannon) - if blocks reach there, game is already over
+        # Shift columns RIGHT: copy col 0..(col-1) to col 1..col
+        # Col 0 (cannon) is empty, we use it to clear column 1
         # Must process RIGHT to LEFT to avoid overwriting source
-        for c in range(col - 1, 0, -1):
+        for c in range(col - 1, -1, -1):
             src_offset = row_offset_data[PLAY_TOP] + word(c) * BLOCK_WIDTH
             dst_offset = src_offset + BLOCK_WIDTH
             blkcpy(Screen.screen, src_offset, Screen.screen, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
             blkcpy(Screen.colors, src_offset, Screen.colors, dst_offset, BLOCK_WIDTH, PLAY_ROWS, SCREEN_WIDTH)
-            self.col_count[c] = self.col_count[c - 1]
-        self.col_count[0] = 0  # Column 1 is now empty
+            self.col_count[c + 1] = self.col_count[c]  # col_count[0] is always 0 (dummy)
 
 
 # =============================================================================
@@ -1608,7 +1641,7 @@ class Game:
     active_col_count: byte = 0  # Number of columns with blocks (for slide sound)
 
     move_timer: word = 0
-    last_jiffy: byte = 0      # Last jiffy_lo value for delta timing (60 Hz)
+    last_jiffy: byte          # Last jiffy_lo value for delta timing (60 Hz)
     column_speed: word = 250  # CIA1 ticks between column movements (60 Hz, platform independent)
 
     running: bool = True
@@ -1880,7 +1913,7 @@ class Game:
 
         # Find first complete column (skip col 0 = cannon)
         for col in range(1, GRID_WIDTH):
-            if self.grid.col_count[col - 1] == GRID_HEIGHT:
+            if self.grid.col_count[col] == GRID_HEIGHT:
                 self.effect_from_cascade = False  # Normal clear, no bonus
                 self.start_effect(col)
                 return
@@ -1889,8 +1922,8 @@ class Game:
         """Update the column number using col_count array (O(19) RAM reads vs O(200) Color RAM reads)."""
         i: byte
         n: byte = 0
-        # col_count[i] = block count for column i+1 (columns 1-19)
-        for i in range(19):
+        # col_count[i] = block count for column i (1-based indexing)
+        for i in range(1, 20):
             if self.grid.col_count[i] != 0:
                 n += 1
 
@@ -2034,11 +2067,10 @@ class Game:
                         had_block_before = False
 
                     # Update col_count based on change
-                    idx = col - 1
                     if has_block_now and not had_block_before:
-                        self.grid.col_count[idx] = self.grid.col_count[idx] + 1
+                        self.grid.col_count[col] += 1
                     elif not has_block_now and had_block_before:
-                        self.grid.col_count[idx] = self.grid.col_count[idx] - 1
+                        self.grid.col_count[col] -= 1
                 col += 1
 
             self.cascade_phase = CASCADE_SETTLE
@@ -2102,7 +2134,7 @@ class Game:
 
         # Look for complete columns (skip col 0 = cannon)
         for col in range(1, GRID_WIDTH):
-            if self.grid.col_count[col - 1] == GRID_HEIGHT:
+            if self.grid.col_count[col] == GRID_HEIGHT:
                 # Found complete column - start column effect
                 # Cascade will resume after column effect completes
                 self.cascade_phase = CASCADE_IDLE
@@ -2200,8 +2232,7 @@ class Game:
 
                 # FIRST: Clear the removed column's col_count (it's now empty!)
                 # This must happen BEFORE shift check, otherwise infinite loop occurs
-                if self.effect_col > 0:
-                    self.grid.col_count[self.effect_col - 1] = 0
+                self.grid.col_count[self.effect_col] = 0
 
                 # Only shift columns if there are blocks to the left of the removed column
                 # Formula: if (GRID_WIDTH - effect_col) < active_col_count, there are blocks to the left
@@ -2286,8 +2317,7 @@ class Game:
                     xy = self.grid.dying_positions[i]
                     col = xy.x >> 1  # Screen x to grid column (no modulo needed!)
                     if col > 0:  # Not the cannon column
-                        idx = col - 1
-                        self.grid.col_count[idx] = self.grid.col_count[idx] - 1
+                        self.grid.col_count[col] = self.grid.col_count[col] - 1
                 self.dying_phase = 0
                 self.grid.dying_count = 0  # Clear the dying list
 
@@ -2509,11 +2539,9 @@ class Game:
         hit_col = self.bullet_hit_col_zp  # Read BEFORE reset!
         self.bullet_hit_col_zp = 255      # Reset to "no hit"
 
-        # Update block count for placed column (column 1 = index 0)
-        # Note: Use explicit read-modify-write because PyCo doesn't support += on subscripts
+        # Update block count for placed column (1-based indexing)
         if hit_col > 0:
-            idx = hit_col - 1
-            self.grid.col_count[idx] += self.grid.col_count[idx]
+            self.grid.col_count[hit_col] += 1
 
         # Hit column 0 means block placed in cannon column - game over!
         # This means the row is completely blocked - immediate game over!
@@ -2616,7 +2644,7 @@ class Game:
         blkcpy(Screen.colors, 82, Screen.colors, 80, 38, 20, 40)
         self.grid.shift_col_count_left()
 
-        # 2. Spawn new column directly to Color RAM (sets col_count[18])
+        # 2. Spawn new column directly to Color RAM (sets col_count[19])
         self.grid.spawn_column()
 
         # 3. Adjust bullet position to match shifted grid
@@ -2847,7 +2875,7 @@ class Game:
 
     def __init__():
         # Timer ZP variables (must be initialized before IRQ starts!)
-        frame_counter: byte[ZP_FRAME_COUNTER] = 0
+        frame_counter: byte[ZP_FRAME_COUNTER]
         game_seconds: word[ZP_GAME_SECONDS] = 0
         jiffy_lo: byte[JIFFY_LO_ADDR]
 
@@ -2858,7 +2886,6 @@ class Game:
         Screen.border = COLOR_SCREEN_BORDER
 
         self.column_speed = level_speeds_data[0]  # Level 1 speed from tuple
-        self.last_jiffy = jiffy_lo  # Initialize delta timing baseline
 
         # Initialize bullet types - first bullet is ALWAYS white for consistency
         # NOTE: bullet_type IS the color (no separate type/color mapping!)
@@ -2899,6 +2926,9 @@ class Game:
 
         # Set music volume
         music_set_volume(9)
+
+        # Reset last jiffy to initialize delta timing baseline
+        self.last_jiffy = jiffy_lo  # Initialize delta timing baseline
 
         # Run game loop
         self.loop()
