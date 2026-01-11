@@ -3221,7 +3221,7 @@ class AboutScreen:
 
         # Copyright
         Screen.print_center(7, "COPYRIGHT 2025-2026", LIGHT_GREY, 0)
-        Screen.print_center(8, "LICENSED UNDER GPL", LIGHT_GREY, 0)
+        Screen.print_center(8, "LICENSED UNDER GPL v3", LIGHT_GREY, 0)
 
         # Technology
         Screen.print_center(11, "WRITTEN IN", LIGHT_GREY, 0)
