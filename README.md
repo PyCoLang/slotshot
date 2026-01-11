@@ -4,7 +4,10 @@
   <i>A fast-paced puzzle shooter for the Commodore 64</i>
 </p>
 
-[Screenshots will be added here]
+<p align="center">
+  <img src="./images/title_screen.png" width="400" alt="Title Screen">
+  <img src="./images/gameplay.png" width="400" alt="Gameplay">
+</p>
 
 ## About
 
@@ -48,7 +51,7 @@ The next bullet type is randomly selected and shown in the "Next" indicator.
 - **RLE Compression**: Efficient storage of title screen artwork
 - **Furnace Tracker Music**: Three original music tracks
 - **Zero Page Optimization**: Fast gameplay with minimal overhead
-- **Memory Relocation**: Critical code relocated to specific addresses for optimal performance
+- **Memory Relocation**: Critical code relocated to specific addresses for better memory utilization
 
 ## Controls
 
@@ -68,40 +71,18 @@ The next bullet type is randomly selected and shown in the "Next" indicator.
 
 ## Building from Source
 
-### Prerequisites
-
-You need the [PyCo compiler](https://github.com/PyCoLang/PyCo) installed to build Slotshot from source.
-
-```bash
-# Install PyCo (if not already installed)
-git clone https://github.com/PyCoLang/PyCo.git
-cd PyCo
-# Follow PyCo installation instructions
-```
-
-### Compilation
-
-```bash
-# Navigate to the Slotshot directory
-cd slotshot
-
-# Compile the game
-pycoc compile slotshot.pyco
-
-# The compiled game will be in build/slotshot.prg
-# A ready-to-run disk image is also generated: build/slotshot.d64
-```
+> **Note**: Slotshot is written in **PyCo**, a Python-inspired programming language for retro systems. The PyCo compiler is currently in private development and will be released under the **Apache 2.0 license** in around **Q3 2026** (maybe sooner).
 
 ### Running
 
 **On VICE Emulator:**
 ```bash
 # Auto-start the disk image
-x64sc build/slotshot.d64
+x64sc slotshot.d64
 ```
 
 **On Real Hardware:**
-- Transfer `build/slotshot.d64` to a 1541 floppy disk or SD2IEC
+- Transfer `slotshot.d64` to a 1541 floppy disk or SD2IEC
 - Load and run: `LOAD "SLOTSHOT",8,1` then `RUN`
 
 ## Project Structure
@@ -137,25 +118,10 @@ slotshot/
 | Charset | $C800-$CFFF | 2 KB | ROM copy + custom chars |
 | Title Bitmap | $E000-$FFFF | 8 KB | Title screen bitmap |
 
-### Performance Optimizations
-
-- **Color RAM Rendering**: Screen filled once, only Color RAM updated per frame
-- **Column Pool**: Pre-generated random patterns for instant spawning
-- **CSE Optimization**: Array base pointer caching
-- **Zero-Compare Optimization**: Direct flag testing without CMP
-- **Constant Folding**: Compile-time expression evaluation
-
-### Code Statistics
-
-- **Lines of Code**: 3,385 lines of PyCo
-- **Compiled Size**: ~43 KB program + 8 KB bitmap
-- **Zero Page Usage**: 34 bytes for game state
-- **Function Count**: 100+ functions and methods
-
 ## Credits
 
 **Created by**: Adam Wallner
-**Written in**: [PyCo Language](https://github.com/PyCoLang/PyCo)
+**Written in**: PyCo Language (coming Q3 2026 under Apache 2.0)
 **Music**: Original compositions in Furnace Tracker
 **Graphics**: Custom C64 multicolor bitmap art
 
@@ -172,14 +138,13 @@ You should have received a copy of the GNU General Public License along with thi
 ## Support the Project
 
 If you enjoy Slotshot, consider supporting development:
-
-[Donation QR code / link will be added here]
+https://bit.ly/slotshot
 
 ## Links
 
-- **PyCo Language**: https://github.com/PyCoLang/PyCo
-- **Issue Tracker**: [Link to issues]
-- **Releases**: [Link to releases]
+- **PyCo Language**: Coming Q3 2026 (Apache 2.0)
+- **Issue Tracker**: https://github.com/PyCoLang/slotshot/issues
+- **Releases**: https://github.com/PyCoLang/slotshot/releases
 
 ---
 

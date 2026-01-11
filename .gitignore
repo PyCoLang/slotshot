@@ -1,0 +1,22 @@
+# Build output
+build/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# AI tools
+.cursor/
+.aider*
+.claude/
+.codex/
