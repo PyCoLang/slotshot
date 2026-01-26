@@ -1,0 +1,2959 @@
+"""
+musicplayer.pyco - Common music driver for PyCo
+
+This is the shared Furnace music player driver.
+Include this ONCE in your program, then include song files.
+
+Based on furC64 by AArt1256, converted for PyCo.
+
+USAGE:
+    include("musicplayer")     # Include driver ONCE
+    include("title_music")     # Title song data
+    include("ingame_music")    # In-game song data
+
+    def main():
+        title_music_init()       # Switch to title song
+        # ...
+        ingame_music_init()      # Switch to in-game song
+
+LOOP CONTROL:
+    # Play a song only once (no repeat):
+    effect_music_init()
+    music_disable_loop()         # Disable looping
+
+    # Check if one-shot song ended:
+    if music_is_ended():
+        # Song finished playing
+        ...
+
+    # Re-enable looping for next song:
+    music_enable_loop()
+
+CHANNEL CONTROL (for SFX):
+    # Reserve channel 2 for sound effects:
+    music_disable_ch(2)          # Music won't touch channel 2
+
+    # Play your SFX on channel 2 (direct SID writes)
+    sfx_shoot()
+
+    # Give channel back to music:
+    music_enable_ch(2)
+
+    # Starting a new song? Restore all channels:
+    new_song_init()
+    music_enable_all_ch()        # All 3 channels for music
+
+    NOTE: The song should be composed to use only channels 0-1 when
+    channel 2 is reserved for SFX. Otherwise, "holes" appear in the music.
+
+FUNCTIONS:
+    music_enable_loop()           - Enable looping (default)
+    music_disable_loop()          - Disable looping (play once)
+    music_is_ended() -> byte      - Check if music ended (1=yes, 0=no)
+    music_disable_ch(ch)          - Disable channel for music (0, 1, or 2)
+    music_enable_ch(ch)           - Re-enable channel for music
+    music_enable_all_ch()         - Re-enable all channels
+    music_set_volume(vol)         - Set master volume (0-15, default: 15)
+    music_stop_fade(tenths)       - Stop with fade out (1-25 = 0.1-2.5 sec)
+"""
+
+
+@naked
+def _musicplayer_driver():
+    """Music player driver code. Called automatically when included."""
+    __asm__("""
+
+// ============================================================
+// FEATURE FLAGS - Default to 0 (disabled) for automatic optimization
+// Song files define flags for features they USE (set to 1)
+// Include song BEFORE musicplayer!
+// ============================================================
+.if (!defined(USE_VIBRATO)) { .var USE_VIBRATO = 0 }
+.if (!defined(USE_PORTAMENTO)) { .var USE_PORTAMENTO = 0 }
+.if (!defined(USE_ARPEGGIO_EFFECT)) { .var USE_ARPEGGIO_EFFECT = 0 }
+.if (!defined(USE_FILTER_EFFECT)) { .var USE_FILTER_EFFECT = 0 }
+.if (!defined(USE_ARP_MACRO)) { .var USE_ARP_MACRO = 0 }
+.if (!defined(USE_DUTY_MACRO)) { .var USE_DUTY_MACRO = 0 }
+.if (!defined(USE_WAVE_MACRO)) { .var USE_WAVE_MACRO = 0 }
+.if (!defined(USE_CUT_MACRO)) { .var USE_CUT_MACRO = 0 }
+.if (!defined(USE_EX1_FILT_MODE)) { .var USE_EX1_FILT_MODE = 0 }
+.if (!defined(USE_EX2_RESONANCE)) { .var USE_EX2_RESONANCE = 0 }
+.if (!defined(USE_EX3_FILT_TOGGLE)) { .var USE_EX3_FILT_TOGGLE = 0 }
+.if (!defined(USE_EX4_SPECIAL)) { .var USE_EX4_SPECIAL = 0 }
+
+    // Jump over driver code
+    jmp _mp_driver_end
+
+
+// ============================================================
+// furC64 DRIVER - Full Furnace music player
+// Converted from CC65 to Kick Assembler syntax
+// ============================================================
+
+// Number of SID channels
+.const CHNUM = 3
+
+// SID chip base address
+.const SID = $D400
+
+// Zero page locations - using PyCo IRQ temp area ($1A-$1F)
+// This allows safe calling from IRQ handlers
+.label temp = $1a           // irq_tmp0: temp bytes 0-3
+.label flags_temp = $1d     // irq_tmp3: same as temp+3
+.label patzp = $1e          // irq_tmp4-5: pattern pointer (16-bit)
+.label macroIns = patzp
+
+// ============================================================
+// SONG DATA POINTERS (set by song's init function)
+// ============================================================
+
+_song_ticks_init:   .word 0     // -> ticks_init (2 bytes: speed1, speed2)
+_song_furnace_hz:   .word 0     // -> furnace_hz (1 byte)
+_song_order_len:    .byte 0     // order list length (copied, not pointer)
+_song_order0L:      .word 0     // -> order0L table
+_song_order0H:      .word 0     // -> order0H table
+_song_order1L:      .word 0     // -> order1L table
+_song_order1H:      .word 0     // -> order1H table
+_song_order2L:      .word 0     // -> order2L table
+_song_order2H:      .word 0     // -> order2H table
+_song_insFL:        .word 0     // -> insFL table (instrument flags lo)
+_song_insFH:        .word 0     // -> insFH table (instrument flags hi)
+_song_insAL:        .word 0     // -> insAL table (arpeggio lo)
+_song_insAH:        .word 0     // -> insAH table (arpeggio hi)
+_song_insDL:        .word 0     // -> insDL table (duty lo)
+_song_insDH:        .word 0     // -> insDH table (duty hi)
+_song_insWL:        .word 0     // -> insWL table (waveform lo)
+_song_insWH:        .word 0     // -> insWH table (waveform hi)
+_song_insCL:        .word 0     // -> insCL table (cutoff lo)
+_song_insCH:        .word 0     // -> insCH table (cutoff hi)
+_song_insAspeed:    .word 0     // -> insAspeed table
+_song_insArel:      .word 0     // -> insArel table
+_song_insDrel:      .word 0     // -> insDrel table
+// ex1-ex4 SID macro pointers
+_song_insFML:       .word 0     // -> insFM lo (filter mode)
+_song_insFMH:       .word 0     // -> insFM hi
+_song_insFMspeed:   .word 0     // -> insFMspeed table
+_song_insFMrel:     .word 0     // -> insFMrel table
+_song_insResL:      .word 0     // -> insRes lo (resonance)
+_song_insResH:      .word 0     // -> insRes hi
+_song_insResspeed:  .word 0     // -> insResspeed table
+_song_insResrel:    .word 0     // -> insResrel table
+_song_insFTL:       .word 0     // -> insFT lo (filter toggle)
+_song_insFTH:       .word 0     // -> insFT hi
+_song_insFTspeed:   .word 0     // -> insFTspeed table
+_song_insFTrel:     .word 0     // -> insFTrel table
+_song_insSPL:       .word 0     // -> insSP lo (special)
+_song_insSPH:       .word 0     // -> insSP hi
+_song_insSPspeed:   .word 0     // -> insSPspeed table
+_song_insSPrel:     .word 0     // -> insSPrel table
+
+// ============================================================
+// PLAYER VARIABLES (BSS)
+// ============================================================
+
+_mp_vars:
+mframeW:        .fill CHNUM, 0
+doMacroW:       .fill CHNUM, 0
+env_reset:      .fill CHNUM, 0
+env_reset2:     .fill CHNUM, $ff
+env_reset3:     .fill CHNUM, $ff
+env_reset4:     .fill CHNUM, 0
+fil_lo_n2:      .fill 1, 0
+fil_hi_n2:      .fill 1, 0
+fil_st2:        .fill 1, 0
+legato:         .fill CHNUM, 0
+test_reset:     .fill CHNUM, 8
+note_tick:      .fill CHNUM, 4
+dur:            .fill CHNUM, 1
+vibrato_param:  .fill CHNUM, 0
+vibrato_phase:  .fill CHNUM, 0
+absfil:         .fill 1, 0
+doMacroC:       .fill 1, 0
+inst2:          .fill CHNUM, 0
+mframeC:        .fill 1, 0
+instF:          .fill 1, 0
+wav:            .fill CHNUM, 0
+hrframe:        .fill CHNUM, 4
+hrc:            .fill CHNUM, 0
+freq_lo1:       .fill CHNUM, 0
+freq_lo2:       .fill CHNUM, 0
+freq_hi1:       .fill CHNUM, 0
+freq_hi2:       .fill CHNUM, 0
+ad:             .fill CHNUM, 0
+sr:             .fill CHNUM, 0
+patseq:         .fill CHNUM*2, 0
+duty_lo:        .fill CHNUM, 0
+duty_hi:        .fill CHNUM, 0
+nextpat:        .fill 1, 0
+patind:         .fill 1, 0
+jumppat:        .fill 1, 0
+ch:             .fill 1, 0
+chm:            .fill 1, 0
+tick:           .fill 1, 0
+ins:            .fill CHNUM, 0
+inst1:          .fill CHNUM, 0
+inst_prev:      .fill CHNUM, 0
+mframeA:        .fill CHNUM, 0
+mframeD:        .fill CHNUM, 0
+doMacroA:       .fill CHNUM, 0
+doMacroD:       .fill CHNUM, 0
+// ex1-ex4 macro state
+doMacroFM:      .fill CHNUM, 0  // Filter Mode enable
+doMacroRes:     .fill CHNUM, 0  // Resonance enable
+doMacroFT:      .fill CHNUM, 0  // Filter Toggle enable
+doMacroSP:      .fill CHNUM, 0  // Special enable
+mframeFM:       .fill CHNUM, 0  // Filter Mode frame
+mframeRes:      .fill CHNUM, 0  // Resonance frame
+mframeFT:       .fill CHNUM, 0  // Filter Toggle frame
+mframeSP:       .fill CHNUM, 0  // Special frame
+filtmode:       .fill 1, 0      // Current filter mode (LP/BP/HP/CH3OFF)
+resval:         .fill 1, 0      // Current resonance value (0-15)
+filtroute:      .fill CHNUM, 0  // Filter routing per channel
+specialbits:    .fill CHNUM, 0  // Special bits per channel (gate/sync/ring/test)
+arp:            .fill CHNUM, 0
+absarp:         .fill CHNUM, 0
+arpTick:        .fill CHNUM, 0
+effects_temp:   .fill 2, 0
+tick_speeds:    .fill 2, 0
+tick_sel:       .fill 1, 0
+slide_amt_lo:   .fill CHNUM, 0
+slide_amt_hi:   .fill CHNUM, 0
+slide_amt_sign: .fill CHNUM, 0
+slide_buffer_lo:.fill CHNUM, 0
+slide_buffer_hi:.fill CHNUM, 0
+note_pitch_lo:  .fill CHNUM, 0
+note_pitch_hi:  .fill CHNUM, 0
+note_n:         .fill CHNUM, 0
+note_dest:      .fill CHNUM, 0
+finepitch:      .fill CHNUM, $80
+cut_dur:        .fill CHNUM, $ff
+pw_mod_lo:      .fill CHNUM, 0
+pw_mod_hi:      .fill CHNUM, 0
+abspw:          .fill CHNUM, 0
+retrigger_pw:   .fill CHNUM, 0
+retrigger_fil:  .fill 1, 0
+triggered_fil:  .fill 1, 0
+arpeff1:        .fill CHNUM, 0
+arpeff2:        .fill CHNUM, 0
+arpind:         .fill CHNUM, 0
+vol:            .fill 1, $7f
+res:            .fill 1, 0
+fil_lo:         .fill 1, $ff
+fil_hi:         .fill 1, $07
+fil_lo_n:       .fill 1, $ff
+fil_hi_n:       .fill 1, $07
+base:           .fill 1, 0
+chipnum:        .fill 1, 0
+is_6581:        .fill 1, 0
+has_played:     .fill CHNUM, 0
+ntsc_converted: .fill 1, 0
+init_mode:      .fill 1, 0      // 0=VIC (PAL/NTSC adaptive), 1=CIA (60Hz fixed)
+loop_enabled:   .fill 1, 1      // 1=loop song, 0=play once and stop
+music_state:    .fill 1, 0      // 0=playing, non-zero=stopped
+channel_enabled:.fill 1, 7      // Bitmask: bit 0=CH0, bit 1=CH1, bit 2=CH2 (default: all enabled)
+stop_at_pattern_end:.fill 1, 0      // 0=normal, 1=stop at next pattern boundary
+master_volume:  .fill 1, 15     // Master volume limit (0-15, default: 15 = full)
+fade_active:    .fill 1, 0      // 0=no fade, 1=fade in progress
+fade_speed:     .fill 1, 0      // Frames per volume step
+fade_counter:   .fill 1, 0      // Frame counter for fade
+fade_saved_vol: .fill 1, 15     // Volume saved before fade started
+
+// Channel bitmask lookup table for enable/disable
+channel_bit_mask:
+    .byte 1, 2, 4               // X=0→1, X=1→2, X=2→4
+
+// Fade speed lookup tables: tenths of seconds (0-25) -> frames per volume step
+// 60Hz table (CIA mode, or VIC+NTSC): frames_per_step = duration * 6 / 15
+fade_speed_60hz:
+    .byte 1, 1, 1, 1, 2, 2, 2, 3, 3, 4   // 0-9 tenths (0-0.9 sec)
+    .byte 4, 4, 5, 5, 6, 6, 6, 7, 7, 8   // 10-19 tenths (1.0-1.9 sec)
+    .byte 8, 8, 9, 9, 10, 10             // 20-25 tenths (2.0-2.5 sec)
+
+// 50Hz table (VIC+PAL): frames_per_step = duration * 5 / 15
+fade_speed_50hz:
+    .byte 1, 1, 1, 1, 1, 2, 2, 2, 3, 3   // 0-9 tenths (0-0.9 sec)
+    .byte 3, 4, 4, 4, 5, 5, 5, 6, 6, 6   // 10-19 tenths (1.0-1.9 sec)
+    .byte 7, 7, 7, 8, 8, 8               // 20-25 tenths (2.0-2.5 sec)
+
+// Alias for compat_hr=1 mode
+.label inst_buffer = inst1
+
+table_1_to_ff:
+table_fil:
+    .byte 0
+    .fill 15, $ff
+
+// ============================================================
+// INITIALIZATION
+// ============================================================
+
+// CIA init - 60Hz fixed on all systems
+// Use this when using CIA timer IRQ for music playback
+_mp_init_cia:
+    lda #1
+    sta init_mode
+    jmp _mp_init_entry
+
+// VIC init - PAL/NTSC adaptive (50/60Hz depending on system)
+// Use this when using VIC raster IRQ for music playback
+_mp_init:
+initaddr:
+    lda #0
+    sta init_mode
+
+_mp_init_entry:
+    // Reset fade state (but keep user-set volume)
+    lda #0
+    sta fade_active
+    // Initialize chip state
+    ldx #0
+_ia_chip_loop:
+    lda #$7f
+    sta vol, x
+    lda #$00
+    sta res, x
+    sta retrigger_fil, x
+    sta triggered_fil, x
+    lda #$ff
+    sta fil_lo, x
+    sta fil_lo_n, x
+    lda #$07
+    sta fil_hi, x
+    sta fil_hi_n, x
+    lda #0
+    sta doMacroC, x
+    sta absfil, x
+    sta fil_lo_n2, x
+    sta fil_hi_n2, x
+    sta fil_st2, x
+    sta mframeC, x
+    sta has_played, x
+    dex
+    bpl _ia_chip_loop
+
+    lda #0
+    sta tick_sel
+
+    // Load ticks_init via song pointer
+    lda _song_ticks_init
+    sta temp
+    lda _song_ticks_init+1
+    sta temp+1
+    ldy #0
+    lda (temp), y
+    sta tick_speeds
+    iny
+    lda (temp), y
+    sta tick_speeds+1
+
+    // PAL/NTSC detection
+    lda #$ff
+_ia_wait_255:
+    cmp $d012
+    bne _ia_wait_255
+    ldx #200
+_ia_wait_loop:
+    dex
+    bne _ia_wait_loop
+    bit $d011
+    bmi _ia_is_pal
+
+    // NTSC detected - convert PAL frequency table to NTSC at runtime
+    // Formula: freq_ntsc = freq_pal * 247 / 256 (PAL_CLOCK/NTSC_CLOCK ≈ 0.9634)
+    // This saves 192 bytes compared to storing a separate NTSC table
+    lda ntsc_converted
+    bne _ia_ntsc_done
+
+    ldx #95
+_ia_ntsc_loop:
+    // Convert PAL freq to NTSC using: freq_ntsc = freq - (freq × 9) / 256
+    // This is equivalent to freq × 247 / 256 but avoids 16-bit overflow
+
+    // Load freq into temp:temp+1, save copy in temp+3:patzp+1
+    lda note_table_lo, x
+    sta temp
+    sta temp+3          // Save original freq_lo
+    lda note_table_hi, x
+    sta temp+1
+    sta patzp+1         // Save original freq_hi
+    lda #0
+    sta temp+2          // Clear high byte for 24-bit result
+
+    // Compute freq × 8 (shift left 3) as 24-bit value
+    asl temp
+    rol temp+1
+    rol temp+2
+    asl temp
+    rol temp+1
+    rol temp+2
+    asl temp
+    rol temp+1
+    rol temp+2
+    // temp:temp+1:temp+2 = freq × 8 (24-bit, no overflow)
+
+    // Add original freq to get freq × 9
+    clc
+    lda temp
+    adc temp+3
+    sta temp
+    lda temp+1
+    adc patzp+1
+    sta temp+1
+    lda temp+2
+    adc #0
+    sta temp+2
+    // temp:temp+1:temp+2 = freq × 9 (24-bit)
+
+    // Divide by 256: (freq × 9) >> 8 = temp+1:temp+2
+    // Subtract from original freq to get freq × 247 / 256
+    sec
+    lda temp+3          // Original freq_lo
+    sbc temp+1          // Subtract (freq×9)>>8 low byte
+    sta note_table_lo, x
+    lda patzp+1         // Original freq_hi
+    sbc temp+2          // Subtract (freq×9)>>8 high byte
+    sta note_table_hi, x
+
+    dex
+    bpl _ia_ntsc_loop
+
+    lda #1
+    sta ntsc_converted
+
+_ia_ntsc_done:
+    // Check if CIA mode - skip VIC-specific speed adjustment
+    lda init_mode
+    bne _ia_cia_speed
+
+    // VIC mode: Load furnace_hz via song pointer
+    lda _song_furnace_hz
+    sta temp
+    lda _song_furnace_hz+1
+    sta temp+1
+    ldy #0
+    lda (temp), y
+    cmp #60
+    beq _ia_speed_done
+    // VIC+NTSC: Furnace=50Hz, NTSC=60Hz: speed * 1.2
+    lda tick_speeds
+    sta temp
+    lsr
+    lsr
+    clc
+    adc temp
+    sta tick_speeds
+    lda tick_speeds+1
+    sta temp
+    lsr
+    lsr
+    clc
+    adc temp
+    sta tick_speeds+1
+    jmp _ia_speed_done
+
+_ia_is_pal:
+    // Check if CIA mode - skip VIC-specific speed adjustment
+    lda init_mode
+    bne _ia_cia_speed
+
+    // VIC mode: Load furnace_hz via song pointer
+    lda _song_furnace_hz
+    sta temp
+    lda _song_furnace_hz+1
+    sta temp+1
+    ldy #0
+    lda (temp), y
+    cmp #50
+    beq _ia_speed_done
+    // Furnace=60Hz, PAL=50Hz: speed * 5/6
+    // Load ticks_init[0] via song pointer
+    lda _song_ticks_init
+    sta temp
+    lda _song_ticks_init+1
+    sta temp+1
+    lda (temp), y       // y=0, ticks_init[0]
+    sta temp+2          // save for later add
+    asl
+    asl
+    clc
+    adc temp+2
+    ldx #0
+    sec
+_ia_div6_loop:
+    cmp #6
+    bcc _ia_div6_done
+    sbc #6
+    inx
+    jmp _ia_div6_loop
+_ia_div6_done:
+    stx tick_speeds
+    // Load ticks_init[1] via song pointer (temp still points there)
+    ldy #1
+    lda (temp), y       // ticks_init[1]
+    sta temp+2          // save for later add
+    asl
+    asl
+    clc
+    adc temp+2
+    ldx #0
+    sec
+_ia_div6_loop2:
+    cmp #6
+    bcc _ia_div6_done2
+    sbc #6
+    inx
+    jmp _ia_div6_loop2
+_ia_div6_done2:
+    stx tick_speeds+1
+    jmp _ia_speed_done
+
+// CIA mode: 60Hz fixed - adjust speed only based on furnace_hz
+_ia_cia_speed:
+    // CIA always runs at 60Hz, so:
+    // - If furnace_hz=60: no adjustment needed (60=60)
+    // - If furnace_hz=50: speed *= 1.2 (60/50)
+    lda _song_furnace_hz
+    sta temp
+    lda _song_furnace_hz+1
+    sta temp+1
+    ldy #0
+    lda (temp), y
+    cmp #50
+    bne _ia_speed_done
+    // Furnace=50Hz, CIA=60Hz: speed * 1.2
+    lda tick_speeds
+    sta temp
+    lsr
+    lsr
+    clc
+    adc temp
+    sta tick_speeds
+    lda tick_speeds+1
+    sta temp
+    lsr
+    lsr
+    clc
+    adc temp
+    sta tick_speeds+1
+
+_ia_speed_done:
+    // 6581/8580 detection
+    lda #0
+    sta is_6581
+    ldx #$18
+_ia_clear_sid:
+    sta SID,x
+    dex
+    bpl _ia_clear_sid
+
+    lda #$ff
+    sta SID+$0f
+    sta SID+$10
+    lda #$51
+    sta SID+$12
+
+    ldx #0
+    ldy #0
+_ia_detect_loop:
+    lda SID+$1b
+    bpl _ia_not_high
+    iny
+_ia_not_high:
+    inx
+    bne _ia_detect_loop
+
+    cpy #64
+    bcs _ia_is_8580
+    lda #1
+    sta is_6581
+    jmp _ia_detect_done
+_ia_is_8580:
+_ia_detect_done:
+    lda #0
+    sta SID+$12
+    sta patind
+
+    ldx #CHNUM-1
+_ia_ch_loop:
+    lda #$80
+    sta finepitch, x
+    lda #1
+    sta dur, x
+    lda #$ff
+    sta cut_dur, x
+    lda #0
+    sta pw_mod_lo, x
+    sta pw_mod_hi, x
+    sta wav, x
+    sta retrigger_pw, x
+    sta abspw, x
+    sta ins, x
+    sta inst1, x
+    sta inst_prev, x
+    sta arp, x
+    sta slide_amt_lo, x
+    sta slide_amt_hi, x
+    sta slide_amt_sign, x
+    sta slide_buffer_lo, x
+    sta slide_buffer_hi, x
+    sta vibrato_phase, x
+    sta vibrato_param, x
+    sta note_dest, x
+    sta mframeA, x
+    sta mframeW, x
+    sta mframeD, x
+    sta mframeFM, x
+    sta mframeRes, x
+    sta mframeFT, x
+    sta mframeSP, x
+    sta doMacroA, x
+    sta doMacroW, x
+    sta doMacroD, x
+    sta doMacroFM, x
+    sta doMacroRes, x
+    sta doMacroFT, x
+    sta doMacroSP, x
+    sta arpTick, x
+    sta env_reset, x
+    sta env_reset4, x
+    lda #$ff
+    sta env_reset2, x
+    sta env_reset3, x
+    lda #8
+    sta test_reset, x
+    lda #4
+    sta hrframe, x
+    sta note_tick, x
+    dex
+    bpl _ia_ch_loop
+
+    ldx #0
+    jsr set_patseq_init
+    lda #0
+    sta tick
+    sta jumppat
+    sta nextpat         // Clear pattern advance flag
+    sta music_state     // Reset state to playing
+    sta stop_at_pattern_end // Clear any pending stop-at-pattern request
+    lda #1
+    sta loop_enabled    // Default: loop enabled
+
+    rts
+
+// ============================================================
+// STOP PLAYBACK
+// ============================================================
+
+_mp_stop:
+    lda #1
+    sta music_state     // Set stopped state
+    lda #0
+    sta fade_active     // Cancel any active fade
+    lda fade_saved_vol
+    sta master_volume   // Restore saved volume
+_mp_stop_silence:
+    // Silence all SID voices (entry point when music_state already set)
+    lda #0
+    sta SID+$04
+    sta SID+$0B
+    sta SID+$12
+    // Keep master volume for SFX, just clear filter mode
+    lda master_volume
+    sta SID+$18
+    rts
+
+// ============================================================
+// CONTINUE PLAYBACK
+// ============================================================
+
+_mp_continue:
+    lda #0
+    sta music_state     // Clear stopped state - playback resumes
+    sta stop_at_pattern_end // Also clear any pending stop-after-pattern
+    sta fade_active     // Cancel any active fade
+    lda fade_saved_vol
+    sta master_volume   // Restore saved volume
+    rts
+
+// ============================================================
+// LOOP CONTROL
+// ============================================================
+
+// Set loop mode: A=0 (play once), A=1 (loop)
+_mp_set_loop:
+    sta loop_enabled
+    rts
+
+// ============================================================
+// EFFECT HANDLERS
+// ============================================================
+
+effectE0:   // 09xx - Set speed 1
+    jsr inc_patzp
+    lda (patzp), y
+    sta tick_speeds
+    jmp begnote
+
+effectE1:   // 0Fxx - Set speed 2
+    jsr inc_patzp
+    lda (patzp), y
+    sta tick_speeds+1
+    jmp begnote
+
+effectE2:   // 00xx - Arpeggio
+    jsr inc_patzp
+    lda (patzp), y
+    sta effects_temp+1
+    ldx ch
+    lda #0
+    sta arpind, x
+    lda effects_temp+1
+    and #$0f
+    sta arpeff2, x
+    lda effects_temp+1
+    lsr
+    lsr
+    lsr
+    lsr
+    sta arpeff1, x
+    jmp begnote
+
+effectE3:   // 01xx - Slide up
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    sta slide_amt_lo, x
+    jsr inc_patzp
+    lda (patzp), y
+    sta slide_amt_hi, x
+    lda #$ff
+    sta slide_amt_sign, x
+    lda #$ff
+    sta note_dest, x
+    jmp begnote
+
+effectE4:   // 02xx - Slide down
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    sta slide_amt_lo, x
+    jsr inc_patzp
+    lda (patzp), y
+    sta slide_amt_hi, x
+    lda #$00
+    sta slide_amt_sign, x
+    lda #$ff
+    sta note_dest, x
+    jmp begnote
+
+effectE5:   // 03xx - Portamento
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    sta slide_amt_lo, x
+    jsr inc_patzp
+    lda (patzp), y
+    sta slide_amt_hi, x
+    ldy #0
+    jsr inc_patzp
+    lda (patzp), y
+    // X already = ch from line 776 (patzp ops don't change X)
+    sta note_dest, x
+    lda note_n, x
+    cmp note_dest, x
+    bne _e5_not_same
+    lda #0
+    sta slide_amt_lo, x
+    sta slide_amt_hi, x
+    sta slide_amt_sign, x
+    jmp begnote
+_e5_not_same:
+    bcc _e5_slide_up
+    lda #$00
+    sta slide_amt_sign, x
+    jmp begnote
+_e5_slide_up:
+    lda #$ff
+    sta slide_amt_sign, x
+    jmp begnote
+
+effectE6:   // 04xx - Vibrato
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    sta vibrato_param, x
+    beq _e6_done
+    sta vibrato_phase, x
+_e6_done:
+    jmp begnote
+
+effectE7:   // 1Bxx - Filter retrigger
+    jsr inc_patzp
+    lda (patzp), y
+    sta effects_temp+1
+    and #$0f
+    tax
+    lda table_fil, x
+    ldx ch
+    beq _e7_no_reset
+    ldx chipnum
+    lda fil_lo_n, x
+    sta fil_lo, x
+    lda fil_hi_n, x
+    sta fil_hi, x
+    ldx ch
+_e7_no_reset:
+    lda effects_temp+1
+    lsr
+    lsr
+    lsr
+    lsr
+    tax
+    lda table_fil, x
+    ldx chipnum
+    sta retrigger_fil, x
+    jmp begnote
+
+effectE8:   // 1Cxx - PWM retrigger
+    jsr inc_patzp
+    lda (patzp), y
+    sta effects_temp+1
+    and #$0f
+    tax
+    lda table_fil, x
+    ldx ch
+    beq _e8_no_reset
+    lda #0
+    sta pw_mod_lo, x
+    sta pw_mod_hi, x
+_e8_no_reset:
+    lda effects_temp+1
+    lsr
+    lsr
+    lsr
+    lsr
+    tax
+    lda table_fil, x
+    ldx ch
+    sta retrigger_pw, x
+    jmp begnote
+
+effectE9:   // E1xx - Relative slide up
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    asl
+    asl
+    sta slide_amt_lo, x
+    lda #$00
+    sta slide_amt_hi, x
+    lda #$ff
+    sta slide_amt_sign, x
+    ldy #0
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    ora #$80
+    sta note_dest, x
+    jmp begnote
+
+effectEA:   // E2xx - Relative slide down
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    asl
+    asl
+    sta slide_amt_lo, x
+    lda #$00
+    sta slide_amt_hi, x
+    sta slide_amt_sign, x
+    ldy #0
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    ora #$80
+    sta note_dest, x
+    jmp begnote
+
+effectEB:   // E5xx - Fine pitch
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    sta finepitch, x
+    jmp begnote
+
+effectEC:   // ECxx - Note cut
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    clc
+    adc #2      // compat_hr=1
+    sta cut_dur, x
+    jmp begnote
+
+effectED:   // 0Bxx - Jump to pattern
+    jsr inc_patzp
+    lda (patzp), y
+    sta patind
+    lda #$ff
+    sta jumppat
+    jmp begnote
+
+effectEE:   // 4xxx - Filter cutoff
+    ldx chipnum
+    lda #0
+    sta doMacroC, x
+    sta fil_hi_n2, x
+    lda #$ff
+    sta fil_st2, x
+    jsr inc_patzp
+    lda (patzp), y
+    ldx chipnum
+    sta fil_lo_n2, x
+    clc
+    asl fil_lo_n2, x
+    rol fil_hi_n2, x
+    clc
+    asl fil_lo_n2, x
+    rol fil_hi_n2, x
+    clc
+    asl fil_lo_n2, x
+    rol fil_hi_n2, x
+    jmp begnote
+
+effectEF:   // EAxx - Legato off
+    ldx ch
+    lda #0
+    sta legato, x
+    jmp begnote
+
+effectF0:   // EAxx - Legato on
+    ldx ch
+    lda #$ff
+    sta legato, x
+    jmp begnote
+
+effectF1:   // 1Axx - Envelope reset timing
+    jsr inc_patzp
+    lda (patzp), y
+    ldx ch
+    sta env_reset3, x
+    jmp begnote
+
+// Effect dispatch table
+eff_lo:
+    .byte <effectE0, <effectE1, <effectE2, <effectE3
+    .byte <effectE4, <effectE5, <effectE6, <effectE7
+    .byte <effectE8, <effectE9, <effectEA, <effectEB
+    .byte <effectEC, <effectED, <effectEE, <effectEF
+    .byte <effectF0, <effectF1
+eff_hi:
+    .byte >effectE0, >effectE1, >effectE2, >effectE3
+    .byte >effectE4, >effectE5, >effectE6, >effectE7
+    .byte >effectE8, >effectE9, >effectEA, >effectEB
+    .byte >effectEC, >effectED, >effectEE, >effectEF
+    .byte >effectF0, >effectF1
+
+// ============================================================
+// OTHER EFFECTS HANDLER
+// ============================================================
+
+other_effects:
+    lda effects_temp
+    cmp #$FB
+    bne _oe_not_fb
+    ldx ch
+    jsr inc_patzp
+    lda (patzp), y
+    sta ins, x
+    jmp begnote
+_oe_not_fb:
+    cmp #$FC
+    bne _oe_not_fc
+    ldx chipnum
+    jsr inc_patzp
+    lda vol
+    and #$f0
+    ora (patzp), y
+    sta vol, x
+    jmp begnote
+_oe_not_fc:
+    cmp #$FD
+    bne _oe_not_fd
+    ldx ch
+    ldy ins, x
+    sty temp+3          // save instrument index
+    // Load insArel[y] via pointer
+    lda _song_insArel
+    sta temp
+    lda _song_insArel+1
+    sta temp+1
+    lda (temp), y
+    sta mframeA, x
+    lda #0
+    sta arpTick, x
+    // Load insDrel[y] via pointer
+    ldy temp+3          // restore instrument index
+    lda _song_insDrel
+    sta temp
+    lda _song_insDrel+1
+    sta temp+1
+    lda (temp), y
+    sta mframeD, x
+    ldx ch
+    lda wav, x
+    and #%11111110
+    sta wav, x
+    lda #1
+    ldx ch
+    sta dur, x
+    ldy #0
+    jmp end_advance
+_oe_not_fd:
+    cmp #$FE
+    bne _oe_not_fe
+    ldx ch
+    lda wav, x
+    and #%11111110
+    sta wav, x
+    lda #1
+    ldx ch
+    sta dur, x
+    ldy #0
+    jmp end_advance
+_oe_not_fe:
+    lda effects_temp
+    cmp #224
+    bcc cont_advance
+    lda effects_temp
+    and #$1f
+    tax
+    lda eff_lo, x
+    sta _effect_smc+1
+    lda eff_hi, x
+    sta _effect_smc+2
+    ldx ch
+    lda effects_temp
+_effect_smc:
+    jmp cont_advance
+
+// ============================================================
+// ADVANCE PATTERN ROUTINE
+// ============================================================
+
+advance:
+_adv_beg:
+    lda ch
+    asl
+    tax
+    lda patseq, x
+    sta patzp
+    lda patseq+1, x
+    sta patzp+1
+
+    ldx ch
+    dec dur, x
+    lda dur, x
+    beq begnote
+    jmp end_advance
+
+begnote:
+    ldy #0
+    jsr inc_patzp
+    lda (patzp), y
+    sta temp
+    sta effects_temp
+    and #$80
+    beq _adv_wait
+    lda temp
+    cmp #$ff
+    beq _adv_blank2
+    jmp other_effects
+
+cont_advance:
+    lda temp
+    and #$7f
+    ldx ch
+    sta note_n, x
+
+    lda note_tick, x
+    cmp #2
+    bcc _ca_skip_hr
+    lda legato, x
+    bne _ca_skip_hr
+    lda #0
+    sta hrframe, x
+    lda #$ff
+    sta hrc, x
+_ca_skip_hr:
+    lda #0
+    sta slide_buffer_lo, x
+    sta slide_buffer_hi, x
+    sta note_tick, x
+    // X already = ch from line 1151
+    lda env_reset2, x
+    sta env_reset, x
+    lda env_reset3, x
+    sta env_reset2, x
+    lda #1
+    sta dur, x
+    sta has_played, x
+    ldy #0
+    jmp end_advance
+
+_adv_wait:
+    lda temp
+    and #$40
+    beq _aw_not_ins
+    ldx ch
+    lda temp
+    and #$3f
+    sta ins, x
+    jmp begnote
+_aw_not_ins:
+    lda temp
+    ldx ch
+    sta dur, x
+_adv_blank2:
+    lda temp
+    cmp #$ff
+    bne end_advance
+    lda #$ff
+    sta nextpat
+
+end_advance:
+    lda ch
+    asl
+    tax
+    lda patzp
+    sta patseq, x
+    lda patzp+1
+    sta patseq+1, x
+    rts
+
+// ============================================================
+// INSTRUMENT ARPEGGIO MACRO (only if USE_ARP_MACRO is enabled)
+// ============================================================
+.if (USE_ARP_MACRO) {
+insarp:
+_ia_beg:
+    ldx ch
+    lda doMacroA, x
+    bne _ia_enabled
+    jmp _ia_end
+_ia_enabled:
+    // X already = ch from _ia_beg
+    ldy inst_buffer, x
+    inc arpTick, x
+    // cmp insAspeed[y] via pointer
+    sty temp+3          // save instrument index
+    lda _song_insAspeed
+    sta temp
+    lda _song_insAspeed+1
+    sta temp+1
+    lda (temp), y       // A = insAspeed[inst]
+    sta temp+2          // save for comparison
+    lda arpTick, x
+    cmp temp+2
+    bcc _ia_checkspeed
+    lda #0
+    sta arpTick, x
+    jmp _ia_doadvance
+
+_ia_checkspeed:
+    // Load insAL[y] -> macroIns via pointer (Y still has inst index)
+    ldy temp+3          // restore instrument index
+    lda _song_insAL
+    sta temp
+    lda _song_insAL+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns
+    // Load insAH[y] -> macroIns+1
+    lda _song_insAH
+    sta temp
+    lda _song_insAH+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns+1
+    // X already = ch (pointer loads don't change X)
+    ldy mframeA, x
+    lda (macroIns), y
+    cmp #$fe
+    bcs _ia_end
+    sec
+    sbc #128
+    sta arp, x
+    lda #0
+    sta absarp, x
+    rts
+
+_ia_doadvance:
+    // X already = ch from jmp at line 1236
+    ldy inst_buffer, x
+    // Load insAL[y] -> macroIns via pointer
+    lda _song_insAL
+    sta temp
+    lda _song_insAL+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns
+    // Load insAH[y] -> macroIns+1
+    lda _song_insAH
+    sta temp
+    lda _song_insAH+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns+1
+    // X already = ch (pointer loads don't change X)
+    ldy mframeA, x
+    lda (macroIns), y
+    cmp #$fe
+    beq _ia_skip2
+    cmp #$ff
+    bne _ia_skip1
+    iny
+    lda (macroIns), y
+    cmp #$ff
+    beq _ia_stop
+    sta mframeA, x
+    jmp _ia_beg
+_ia_stop:
+    lda #0
+    sta doMacroA, x
+    rts
+_ia_skip1:
+    sec
+    sbc #128
+    sta arp, x
+    lda #0
+    sta absarp, x
+    inc mframeA, x
+    rts
+_ia_skip2:
+    iny
+    lda (macroIns), y
+    sta arp, x
+    lda #$ff
+    sta absarp, x
+    inc mframeA, x
+    inc mframeA, x
+_ia_end:
+    rts
+}
+
+// ============================================================
+// INSTRUMENT DUTY MACRO (only if USE_DUTY_MACRO is enabled)
+// ============================================================
+.if (USE_DUTY_MACRO) {
+insduty:
+_id_beg:
+    ldx ch
+    lda doMacroD, x
+    beq _id_end
+    // X already = ch from _id_beg
+    ldy inst_buffer, x
+    // Load insDL[y] -> macroIns via pointer
+    lda _song_insDL
+    sta temp
+    lda _song_insDL+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns
+    // Load insDH[y] -> macroIns+1
+    lda _song_insDH
+    sta temp
+    lda _song_insDH+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns+1
+    ldy mframeD, x
+    lda (macroIns), y
+    sta temp
+    cmp #$ff
+    bne _id_skip1
+    iny
+    lda (macroIns), y
+    cmp #$ff
+    beq _id_stop
+    sta mframeD, x
+    jmp _id_beg
+_id_stop:
+    lda #0
+    sta doMacroD, x
+    rts
+_id_skip1:
+    iny
+    lda (macroIns), y
+    sta temp+1
+    lda abspw, x
+    bne _id_abs
+    lda temp+1
+    sec
+    sbc #$80
+    sta temp+1
+    lda pw_mod_lo, x
+    clc
+    adc temp
+    sta pw_mod_lo, x
+    lda pw_mod_hi, x
+    adc temp+1
+    sta pw_mod_hi, x
+    inc mframeD, x
+    inc mframeD, x
+    rts
+_id_abs:
+    lda temp
+    sta duty_lo, x
+    lda temp+1
+    sta duty_hi, x
+    lda #0
+    sta pw_mod_lo, x
+    sta pw_mod_hi, x
+    inc mframeD, x
+    inc mframeD, x
+_id_end:
+    rts
+}
+
+// ============================================================
+// INSTRUMENT WAVE MACRO (only if USE_WAVE_MACRO is enabled)
+// ============================================================
+.if (USE_WAVE_MACRO) {
+inswave:
+_iw_beg:
+    ldx ch
+    lda doMacroW, x
+    beq _iw_end
+    // X already = ch from _iw_beg
+    ldy inst_buffer, x
+    // Load insWL[y] -> macroIns via pointer
+    lda _song_insWL
+    sta temp
+    lda _song_insWL+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns
+    // Load insWH[y] -> macroIns+1
+    lda _song_insWH
+    sta temp
+    lda _song_insWH+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns+1
+    // X already = ch (pointer loads don't change X)
+    ldy mframeW, x
+    lda (macroIns), y
+    cmp #$ff
+    bne _iw_skip1
+    iny
+    lda (macroIns), y
+    cmp #$ff
+    beq _iw_stop
+    sta mframeW, x
+    jmp _iw_beg
+_iw_stop:
+    lda #0
+    sta doMacroW, x
+    rts
+_iw_skip1:
+    // X already = ch (from bne branch, X unchanged)
+    pha
+    lda wav, x
+    and #$0f
+    sta wav, x
+    pla
+    ora wav, x
+    sta wav, x
+    inc mframeW, x
+_iw_end:
+    rts
+}
+
+// ============================================================
+// INSTRUMENT FILTER CUTOFF MACRO (only if USE_CUT_MACRO is enabled)
+// ============================================================
+.if (USE_CUT_MACRO) {
+inscut:
+_ic_beg:
+    ldx ch
+    lda doMacroC, x
+    beq _ic_end
+    // X already = ch from _ic_beg
+    ldy instF, x
+    // Load insCL[y] -> macroIns via pointer
+    lda _song_insCL
+    sta temp
+    lda _song_insCL+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns
+    // Load insCH[y] -> macroIns+1
+    lda _song_insCH
+    sta temp
+    lda _song_insCH+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns+1
+    // X already = ch (pointer loads don't change X)
+    ldy mframeC, x
+    lda (macroIns), y
+    sta temp
+    cmp #$ff
+    bne _ic_skip1
+    iny
+    lda (macroIns), y
+    cmp #$ff
+    beq _ic_stop
+    sta mframeC, x
+    jmp _ic_beg
+_ic_stop:
+    lda #0
+    sta doMacroC, x
+    rts
+_ic_skip1:
+    iny
+    lda (macroIns), y
+    sta temp+1
+    lda absfil, x
+    bne _ic_abs
+    lda temp+1
+    sec
+    sbc #$80
+    sta temp+1
+    lda fil_lo, x
+    clc
+    adc temp
+    sta fil_lo, x
+    lda fil_hi, x
+    adc temp+1
+    sta fil_hi, x
+    jmp _ic_inc
+_ic_abs:
+    lda temp
+    sta fil_lo, x
+    lda temp+1
+    sta fil_hi, x
+_ic_inc:
+    inc mframeC, x
+    inc mframeC, x
+_ic_end:
+    rts
+}
+
+// ============================================================
+// ex1: FILTER MODE MACRO (only if USE_EX1_FILT_MODE is enabled)
+// ============================================================
+.if (USE_EX1_FILT_MODE) {
+insfiltmode:
+_ifm_beg:
+    ldx ch
+    lda doMacroFM, x
+    beq _ifm_end
+    // X already = ch from _ifm_beg
+    ldy instF, x
+    // Load insFML[y] -> macroIns
+    lda _song_insFML
+    sta temp
+    lda _song_insFML+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns
+    // Load insFMH[y] -> macroIns+1
+    lda _song_insFMH
+    sta temp
+    lda _song_insFMH+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns+1
+    // X already = ch (pointer loads don't change X)
+    ldy mframeFM, x
+    lda (macroIns), y
+    cmp #$ff
+    bne _ifm_val
+    iny
+    lda (macroIns), y
+    cmp #$ff
+    beq _ifm_stop
+    sta mframeFM, x
+    jmp _ifm_beg
+_ifm_stop:
+    lda #0
+    sta doMacroFM, x
+    rts
+_ifm_val:
+    sta filtmode
+    inc mframeFM, x
+_ifm_end:
+    rts
+}
+
+// ============================================================
+// ex2: RESONANCE MACRO (only if USE_EX2_RESONANCE is enabled)
+// ============================================================
+.if (USE_EX2_RESONANCE) {
+insresonance:
+_ires_beg:
+    ldx ch
+    lda doMacroRes, x
+    beq _ires_end
+    // X already = ch from _ires_beg
+    ldy instF, x
+    // Load insResL[y] -> macroIns
+    lda _song_insResL
+    sta temp
+    lda _song_insResL+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns
+    // Load insResH[y] -> macroIns+1
+    lda _song_insResH
+    sta temp
+    lda _song_insResH+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns+1
+    // X already = ch (pointer loads don't change X)
+    ldy mframeRes, x
+    lda (macroIns), y
+    cmp #$ff
+    bne _ires_val
+    iny
+    lda (macroIns), y
+    cmp #$ff
+    beq _ires_stop
+    sta mframeRes, x
+    jmp _ires_beg
+_ires_stop:
+    lda #0
+    sta doMacroRes, x
+    rts
+_ires_val:
+    sta resval
+    inc mframeRes, x
+_ires_end:
+    rts
+}
+
+// ============================================================
+// ex3: FILTER TOGGLE MACRO (only if USE_EX3_FILT_TOGGLE is enabled)
+// ============================================================
+.if (USE_EX3_FILT_TOGGLE) {
+insfilttoggle:
+_ift_beg:
+    ldx ch
+    lda doMacroFT, x
+    beq _ift_end
+    // X already = ch from _ift_beg
+    ldy instF, x
+    // Load insFTL[y] -> macroIns
+    lda _song_insFTL
+    sta temp
+    lda _song_insFTL+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns
+    // Load insFTH[y] -> macroIns+1
+    lda _song_insFTH
+    sta temp
+    lda _song_insFTH+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns+1
+    // X already = ch (pointer loads don't change X)
+    ldy mframeFT, x
+    lda (macroIns), y
+    cmp #$ff
+    bne _ift_val
+    iny
+    lda (macroIns), y
+    cmp #$ff
+    beq _ift_stop
+    sta mframeFT, x
+    jmp _ift_beg
+_ift_stop:
+    lda #0
+    sta doMacroFT, x
+    rts
+_ift_val:
+    sta filtroute, x
+    inc mframeFT, x
+_ift_end:
+    rts
+}
+
+// ============================================================
+// ex4: SPECIAL MACRO (gate/sync/ring/test) - only if USE_EX4_SPECIAL is enabled
+// ============================================================
+.if (USE_EX4_SPECIAL) {
+insspecial:
+_isp_beg:
+    ldx ch
+    lda doMacroSP, x
+    beq _isp_end
+    // X already = ch from _isp_beg
+    ldy instF, x
+    // Load insSPL[y] -> macroIns
+    lda _song_insSPL
+    sta temp
+    lda _song_insSPL+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns
+    // Load insSPH[y] -> macroIns+1
+    lda _song_insSPH
+    sta temp
+    lda _song_insSPH+1
+    sta temp+1
+    lda (temp), y
+    sta macroIns+1
+    // X already = ch (pointer loads don't change X)
+    ldy mframeSP, x
+    lda (macroIns), y
+    cmp #$ff
+    bne _isp_val
+    iny
+    lda (macroIns), y
+    cmp #$ff
+    beq _isp_stop
+    sta mframeSP, x
+    jmp _isp_beg
+_isp_stop:
+    lda #0
+    sta doMacroSP, x
+    rts
+_isp_val:
+    sta specialbits, x
+    inc mframeSP, x
+_isp_end:
+    rts
+}
+
+// ============================================================
+// FINE PITCH / VIBRATO (only if USE_VIBRATO is enabled)
+// ============================================================
+.if (USE_VIBRATO) {
+doFinepitch:
+    lda vibrato_param, x
+    lsr
+    lsr
+    lsr
+    lsr
+    clc
+    adc vibrato_phase, x
+    and #63
+    sta vibrato_phase, x
+    tay
+    lda vibrato_param, x
+    and #$0f
+    ora triangle_lookup, y
+    tay
+
+    clc
+    lda note_pitch_lo, x
+    adc #$40
+    sta temp
+    lda note_pitch_hi, x
+    adc #1
+    sta temp+1
+
+    sec
+    lda temp
+    sbc finepitch, x
+    sta temp
+    bcs _fp_no_dec
+    dec temp+1
+_fp_no_dec:
+
+    lda tri_vibrato_lookup, y
+    lsr
+    clc
+    adc tri_vibrato_lookup, y
+    sta temp+2
+    lda #0
+    adc #0
+    sta temp+3
+
+    sec
+    lda temp
+    sbc temp+2
+    sta temp
+    lda temp+1
+    sbc temp+3
+    sta temp+1
+    rts
+}
+
+// Simplified version when no vibrato (just copy note_pitch to temp)
+.if (!USE_VIBRATO) {
+doFinepitch:
+    lda note_pitch_lo, x
+    sta temp
+    lda note_pitch_hi, x
+    sta temp+1
+    rts
+}
+
+// ============================================================
+// CHANNEL PROCESSING (HR mode)
+// ============================================================
+
+do_ch_jsr:
+    ldx ch
+    lda env_reset4, x
+    beq _dc_no_dec
+    dec env_reset4, x
+_dc_no_dec:
+    lda hrc, x
+    beq _dc_skipHR1
+
+    lda #0
+    sta hrc, x
+    // HR_ADSR = 1
+    lda env_reset, x
+    beq _dc_no_reset
+    lda #$00    // TEST_AD
+    sta ad, x
+    lda #$00    // TEST_SR
+    sta sr, x
+    lda wav, x
+    and #254    // 255^1
+    ora test_reset, x
+    sta wav, x
+    jmp _dc_hr1_done
+_dc_no_reset:
+    lda #1
+    sta env_reset4, x
+_dc_hr1_done:
+    lda #0
+    sta doMacroA, x
+    sta doMacroD, x
+    sta doMacroW, x
+
+_dc_skipHR1:
+    lda hrframe, x
+    cmp #4
+    bne _dc_not4
+    jmp _dc_skipHR2
+_dc_not4:
+    inc hrframe, x
+    // compat_hr = 1
+    cmp #1
+    beq _dc_do_hr2
+    jmp _dc_skipHR2
+_dc_do_hr2:
+    // X already = ch (from beq branch at _dc_not4)
+    lda #0
+    sta mframeA, x
+    sta mframeD, x
+    sta mframeW, x
+    sta mframeFM, x
+    sta mframeRes, x
+    sta mframeFT, x
+    sta mframeSP, x
+    sta arpTick, x
+    lda #$ff
+    sta doMacroA, x
+    sta doMacroD, x
+    sta doMacroW, x
+    sta doMacroFM, x
+    sta doMacroRes, x
+    sta doMacroFT, x
+    sta doMacroSP, x
+
+    lda inst_buffer, x
+    tay                     // Y = instrument index
+    // Load insFL[y] via song pointer
+    lda _song_insFL
+    sta temp
+    lda _song_insFL+1
+    sta temp+1
+    lda (temp), y
+    sta patzp
+    // Load insFH[y] via song pointer
+    lda _song_insFH
+    sta temp
+    lda _song_insFH+1
+    sta temp+1
+    lda (temp), y
+    sta patzp+1
+
+    // X already = ch (pointer loads don't change X)
+    ldy #1
+    lda (patzp), y
+    sta ad, x
+    iny
+    lda (patzp), y
+    sta sr, x
+
+    iny
+    lda (patzp), y
+    sta duty_lo, x
+    iny
+    lda (patzp), y
+    sta duty_hi, x
+
+    iny
+    lda (patzp), y
+    sta flags_temp
+    and #1
+    sta abspw, x
+
+    lda flags_temp
+    and #2
+    beq _dc_no_pw_reset
+    lda #0
+    sta pw_mod_lo, x
+    sta pw_mod_hi, x
+_dc_no_pw_reset:
+
+    lda flags_temp
+    and #4
+    tay
+    ldx chipnum
+    lda res, x
+    ldx chm
+    and ch_filter_enable_inv, x
+    cpy #0
+    beq _dc_no_filter
+    ora ch_filter_enable, x
+_dc_no_filter:
+    ldx chipnum
+    sta res, x
+
+    lda flags_temp
+    and #8
+    beq _dc_no_init_filter
+    ldx chipnum
+    lda #0
+    sta doMacroC, x
+    lda res, x
+    and #$0f
+    ldy #6
+    ora (patzp), y
+    sta res, x
+    iny
+    lda vol, x
+    and #$0f
+    ora (patzp), y
+    sta vol, x
+    iny
+    lda (patzp), y
+    sta fil_lo_n, x
+    iny
+    lda (patzp), y
+    sta fil_hi_n, x
+
+    lda flags_temp
+    and #32
+    bne _dc_skip_filter_copy
+    lda triggered_fil, x
+    beq _dc_do_filter_copy
+    lda retrigger_fil, x
+    beq _dc_skip_filter_copy
+_dc_do_filter_copy:
+    lda #$ff
+    sta triggered_fil, x
+    lda fil_lo_n, x
+    sta fil_lo, x
+    lda fil_hi_n, x
+    sta fil_hi, x
+_dc_skip_filter_copy:
+
+    ldx ch
+    lda inst_buffer, x
+    cmp inst_prev, x
+    beq _dc_no_new_ins
+    ldx chipnum
+    lda fil_lo_n, x
+    sta fil_lo, x
+    lda fil_hi_n, x
+    sta fil_hi, x
+    ldx ch
+    lda inst_buffer, x
+    sta inst_prev, x
+_dc_no_new_ins:
+_dc_no_init_filter:
+
+    lda flags_temp
+    and #32
+    beq _dc_no_cut_macro
+    ldx ch
+    lda inst_buffer, x
+    ldx chipnum
+    sta instF, x
+    lda #0
+    sta mframeC, x
+    lda #$ff
+    sta doMacroC, x
+
+    lda flags_temp
+    and #16
+    lsr
+    tay
+    lda table_1_to_ff, y
+    ldy chipnum
+    sta absfil, y
+_dc_no_cut_macro:
+
+    lda flags_temp
+    and #64
+    lsr
+    lsr
+    lsr
+    ldx ch
+    sta test_reset, x
+
+    lda retrigger_pw, x
+    beq _dc_no_pw_retrig
+    lda #0
+    sta pw_mod_lo, x
+    sta pw_mod_hi, x
+_dc_no_pw_retrig:
+
+    lda mframeW, x
+    beq _dc_no_wave_override
+    ldy #0
+    lda (patzp), y
+    and #$0f
+    sta temp
+    lda wav, x
+    and #%11110000
+    ora #1
+    ora temp
+    sta wav, x
+    jmp _dc_skipHR2
+_dc_no_wave_override:
+    // X already = ch (from beq branch, X unchanged since 1978)
+    ldy #0
+    lda (patzp), y
+    ora #1
+    sta wav, x
+
+_dc_skipHR2:
+    rts
+
+// ============================================================
+// MAIN PLAY ROUTINE
+// ============================================================
+
+_mp_play:
+playaddr:
+    // Check if music is stopped (paused or ended)
+    lda music_state
+    beq _mp_play_continue
+    rts
+_mp_play_continue:
+    // Handle fade out (runs every frame, independent of tick)
+    lda fade_active
+    beq _mp_no_fade
+    dec fade_counter
+    bne _mp_no_fade
+    // Counter reached 0, decrease volume
+    lda fade_speed
+    sta fade_counter          // Reset counter
+    dec master_volume
+    bpl _mp_no_fade           // If >= 0, continue playing
+    // Volume reached 0, stop music completely
+    // Use full _mp_stop to properly reset state (restores saved volume)
+    jmp _mp_stop
+_mp_no_fade:
+    ldx tick_sel
+    inc tick
+    lda tick
+    cmp tick_speeds, x
+    bcs _pa_do_advance
+    jmp skipseq
+_pa_do_advance:
+    lda #0
+    sta tick
+
+advance_tick:
+    lda tick_sel
+    eor #1
+    sta tick_sel
+    ldx #0
+    lda #0
+_pa_clear_fil:
+    sta fil_st2, x
+    dex
+    bpl _pa_clear_fil
+
+    // Process all 3 channels
+    lda #0
+    sta ch
+    lda #0
+    sta chipnum
+    jsr advance
+
+    lda #1
+    sta ch
+    lda #0
+    sta chipnum
+    jsr advance
+
+    lda #2
+    sta ch
+    lda #0
+    sta chipnum
+    jsr advance
+
+    lda nextpat
+    beq skipnextpat
+    lda #0
+    sta nextpat
+    lda jumppat
+    beq _pa_not_jump
+    lda #0
+    sta jumppat
+    jmp _pa_after_jump
+_pa_not_jump:
+    // Check if stop-at-pattern was requested
+    lda stop_at_pattern_end
+    beq _pa_no_stop_req
+    // Stop requested: clear flag and stop playback
+    lda #0
+    sta stop_at_pattern_end
+    jsr _mp_stop
+    rts
+_pa_no_stop_req:
+    inc patind
+    lda patind
+    cmp _song_order_len
+    bne _pa_after_jump
+    // Song reached end - check if we should loop
+    lda loop_enabled
+    bne _pa_do_loop
+    // No loop - stop playback (sets music_state=1)
+    jsr _mp_stop
+    rts
+_pa_do_loop:
+    lda #0
+    sta patind
+_pa_after_jump:
+    jsr set_patseq
+    ldx #CHNUM-1
+    lda #1
+durloop:
+    sta dur, x
+    dex
+    bpl durloop
+    jmp advance_tick
+
+skipnextpat:
+    lda jumppat
+    beq skipseq
+    lda #$ff
+    sta nextpat
+
+skipseq:
+    // Channel 0
+    ldx #0
+    lda inst1, x
+    sta inst2, x
+    lda ins, x
+    sta inst1, x
+    lda #0
+    sta ch
+    sta chm
+    sta base
+    sta chipnum
+    jsr do_ch_jsr
+
+    // Channel 1
+    ldx #1
+    lda inst1, x
+    sta inst2, x
+    lda ins, x
+    sta inst1, x
+    lda #1
+    sta ch
+    sta chm
+    lda #7
+    sta base
+    lda #0
+    sta chipnum
+    jsr do_ch_jsr
+
+    // Channel 2
+    ldx #2
+    lda inst1, x
+    sta inst2, x
+    lda ins, x
+    sta inst1, x
+    lda #2
+    sta ch
+    sta chm
+    lda #14
+    sta base
+    lda #0
+    sta chipnum
+    jsr do_ch_jsr
+
+    // Instrument macros for all channels
+    lda #0
+    sta ch
+.if (USE_ARP_MACRO) { jsr insarp }
+.if (USE_WAVE_MACRO) { jsr inswave }
+.if (USE_DUTY_MACRO) { jsr insduty }
+
+    lda #1
+    sta ch
+.if (USE_ARP_MACRO) { jsr insarp }
+.if (USE_WAVE_MACRO) { jsr inswave }
+.if (USE_DUTY_MACRO) { jsr insduty }
+
+    lda #2
+    sta ch
+.if (USE_ARP_MACRO) { jsr insarp }
+.if (USE_WAVE_MACRO) { jsr inswave }
+.if (USE_DUTY_MACRO) { jsr insduty }
+
+    // Filter cutoff macro
+    lda #0
+    sta ch
+.if (USE_CUT_MACRO) { jsr inscut }
+    // ex1-ex4 macros (filter mode, resonance, filter toggle, special)
+.if (USE_EX1_FILT_MODE) { jsr insfiltmode }
+.if (USE_EX2_RESONANCE) { jsr insresonance }
+.if (USE_EX3_FILT_TOGGLE) { jsr insfilttoggle }
+.if (USE_EX4_SPECIAL) { jsr insspecial }
+    ldx ch
+    lda fil_st2, x
+    beq _pa_no_fil2
+    lda fil_lo_n2, x
+    sta fil_lo, x
+    lda fil_hi_n2, x
+    sta fil_hi, x
+_pa_no_fil2:
+
+    // Note cut processing
+    ldx #CHNUM-1
+note_cut_loop:
+    lda cut_dur, x
+    cmp #$ff
+    beq note_cut_loop_end
+    dec cut_dur, x
+    lda cut_dur, x
+    beq _nc_do_cut
+    jmp note_cut_loop_end
+_nc_do_cut:
+    lda #$ff
+    sta cut_dur, x
+    lda wav, x
+    and #%11111110
+    sta wav, x
+note_cut_loop_end:
+    dex
+    bpl note_cut_loop
+
+    // Relative slide destination calculation
+    ldx #CHNUM-1
+relslide_loop:
+    lda note_dest, x
+    and #$80
+    beq slide_skip
+    eor note_dest, x
+    sta macroIns
+    lda slide_amt_sign, x
+    beq positive_slide2
+    lda note_n, x
+    clc
+    adc macroIns
+    jsr clamp_note
+    sta note_dest, x
+    jmp slide_skip
+positive_slide2:
+    lda note_n, x
+    sec
+    sbc macroIns
+    jsr clamp_note
+    sta note_dest, x
+slide_skip:
+    dex
+    bpl relslide_loop
+
+    // Calculate note pitches
+    ldx #CHNUM-1
+note_loop:
+    jsr calc_ch_pitch
+    dex
+    bpl note_loop
+
+    // Slide processing
+    ldx #CHNUM-1
+slide_loop:
+    lda slide_amt_lo, x
+    ora slide_amt_hi, x
+    bne _sl_do_slide
+    jmp slide_loop2
+_sl_do_slide:
+    // Scale slide amount
+    ldy note_pitch_hi, x
+    lda scale_table, y
+    sta temp+2
+    lda slide_amt_lo, x
+    sta temp
+    lda slide_amt_hi, x
+    sta temp+1
+
+    lda temp+2
+    beq _sl_no_scale
+    bpl _sl_scale_left
+_sl_scale_right:
+    eor #$ff
+    clc
+    adc #1
+    tay
+_sl_rloop:
+    lsr temp+1
+    ror temp
+    dey
+    bne _sl_rloop
+    jmp _sl_no_scale
+_sl_scale_left:
+    tay
+_sl_lloop:
+    asl temp
+    rol temp+1
+    dey
+    bne _sl_lloop
+_sl_no_scale:
+
+    lda slide_amt_sign, x
+    bne positive_slide
+    sec
+    lda slide_buffer_lo, x
+    sbc temp
+    sta slide_buffer_lo, x
+    lda slide_buffer_hi, x
+    sbc temp+1
+    sta slide_buffer_hi, x
+
+    lda note_dest, x
+    cmp #96
+    bcs slide_loop2
+
+    ldy note_dest, x
+    lda note_table_lo, y
+    sta patzp
+    lda note_table_hi, y
+    sta patzp+1
+    lda note_pitch_lo, x
+    sta temp
+    lda note_pitch_hi, x
+    sta temp+1
+    // cmp16 patzp, temp
+    lda patzp
+    sec
+    sbc temp
+    lda patzp+1
+    sbc temp+1
+    bcc slide_loop2
+    bcs finish_slide
+
+positive_slide:
+    clc
+    lda slide_buffer_lo, x
+    adc temp
+    sta slide_buffer_lo, x
+    lda slide_buffer_hi, x
+    adc temp+1
+    sta slide_buffer_hi, x
+    jmp _sl_check_dest
+
+finish_slide:
+    lda note_dest, x
+    sta note_n, x
+    lda #0
+    sta slide_buffer_lo, x
+    sta slide_buffer_hi, x
+    sta slide_amt_lo, x
+    sta slide_amt_hi, x
+    sta slide_amt_sign, x
+    jmp slide_loop2
+
+_sl_check_dest:
+    lda note_dest, x
+    cmp #96
+    bcs slide_loop2
+    ldy note_dest, x
+    lda note_table_lo, y
+    sta patzp
+    lda note_table_hi, y
+    sta patzp+1
+    lda note_pitch_lo, x
+    sta temp
+    lda note_pitch_hi, x
+    sta temp+1
+    // cmp16 temp, patzp
+    lda temp
+    sec
+    sbc patzp
+    lda temp+1
+    sbc patzp+1
+    bcc slide_loop2
+    bcs finish_slide
+
+slide_loop2:
+    dex
+    bmi slide_loopt
+    jmp slide_loop
+slide_loopt:
+
+    // Note tick update
+    ldx #CHNUM-1
+_nt_loop:
+    lda note_tick, x
+    cmp #96
+    beq note_tick_loop
+    inc note_tick, x
+note_tick_loop:
+    lda has_played, x
+    bne note_tick_loop2
+    lda #3
+    sta note_tick, x
+note_tick_loop2:
+    dex
+    bpl _nt_loop
+
+    // Write volume + filter mode to $D418
+    // vol already contains: bits 0-3 = volume, bits 4-7 = filter mode
+    lda filtmode
+    beq _so_no_fm
+    // ex1 filter mode macro active - override filter mode bits
+    asl
+    asl
+    asl
+    asl             // shift to upper nibble
+    sta temp
+    lda vol
+    and #$0f        // keep volume only
+    ora temp        // add macro filter mode
+    jmp _so_write_vol
+_so_no_fm:
+    // No ex1 macro - use vol as-is (includes instrument filter mode)
+    lda vol
+_so_write_vol:
+    // A contains: bits 0-3 = volume, bits 4-7 = filter mode
+    // Apply master volume limit
+    tax                     // save full byte in X
+    and #$0f                // extract volume
+    cmp master_volume       // compare with master volume
+    bcc _so_vol_ok          // if vol < master, keep it
+    lda master_volume       // else use master volume
+_so_vol_ok:
+    sta temp                // save limited volume
+    txa                     // get original byte
+    and #$f0                // keep filter mode only
+    ora temp                // add limited volume
+    sta SID+$18
+
+    // Write filter resonance + routing to $D417
+    // res already contains: bits 0-2 = filter routing, bits 4-7 = resonance
+    // Add filter toggle macro values if active (OR with existing routing)
+    lda res
+    ora filtroute+0
+    ora filtroute+1
+    ora filtroute+2
+    sta temp
+    // Check for ex2 resonance macro
+    lda resval
+    beq _so_no_res
+    // ex2 resonance macro active - override resonance bits
+    asl
+    asl
+    asl
+    asl             // shift to upper nibble
+    sta temp+1
+    lda temp
+    and #$0f        // keep routing only
+    ora temp+1      // add macro resonance
+    jmp _so_write_res
+_so_no_res:
+    // No ex2 macro - use temp as-is (includes instrument resonance)
+    lda temp
+_so_write_res:
+    sta SID+$17
+
+    // Write filter cutoff
+    lda fil_lo
+    sta temp
+    lda fil_hi
+    sta temp+1
+    clc
+    lsr temp+1
+    ror temp
+    clc
+    lsr temp+1
+    ror temp
+    clc
+    lsr temp+1
+    ror temp
+    lda temp
+    ldy is_6581
+    beq _fc_no_scale
+    asl
+    bcc _fc_no_scale
+    lda #$ff
+_fc_no_scale:
+    sta SID+$16
+
+    // Recalculate pitches for SID output
+    ldx #CHNUM-1
+note_loop3:
+    jsr calc_ch_pitch
+    dex
+    bpl note_loop3
+
+    // Write SID registers for enabled channels only
+    ldx #2
+_sid_loop:
+    // Check if this channel is enabled (for SFX support)
+    lda channel_enabled
+    and channel_bit_mask, x
+    beq _sid_skip_channel      // Skip if channel disabled
+
+    txa
+    pha
+    tax
+    jsr doFinepitch
+    pla
+    tax
+
+    ldy ch_mul_tabl, x
+    lda temp
+    sta SID, y
+    lda temp+1
+    sta SID+1, y
+
+    lda ad, x
+    sta SID+5, y
+    lda sr, x
+    sta SID+6, y
+
+    lda wav, x
+    jsr fix_wav_6581
+    sta SID+4, y
+    lda duty_lo, x
+    clc
+    adc pw_mod_lo, x
+    sta SID+2, y
+    lda duty_hi, x
+    adc pw_mod_hi, x
+    and #$0f
+    sta SID+3, y
+
+_sid_skip_channel:
+    dex
+    bpl _sid_loop
+
+    rts
+
+// ============================================================
+// HELPER ROUTINES
+// ============================================================
+
+set_patseq:
+    stx temp+2
+    // Fall through to set_patseq_init
+set_patseq_init:
+    // Uses song pointers for order tables
+    // Y = patind (index into order tables)
+    ldy patind
+
+    // order0L[patind] -> patseq+0
+    lda _song_order0L
+    sta temp
+    lda _song_order0L+1
+    sta temp+1
+    lda (temp), y
+    sta patseq+0
+
+    // order0H[patind] -> patseq+1
+    lda _song_order0H
+    sta temp
+    lda _song_order0H+1
+    sta temp+1
+    lda (temp), y
+    sta patseq+1
+
+    // order1L[patind] -> patseq+2
+    lda _song_order1L
+    sta temp
+    lda _song_order1L+1
+    sta temp+1
+    lda (temp), y
+    sta patseq+2
+
+    // order1H[patind] -> patseq+3
+    lda _song_order1H
+    sta temp
+    lda _song_order1H+1
+    sta temp+1
+    lda (temp), y
+    sta patseq+3
+
+    // order2L[patind] -> patseq+4
+    lda _song_order2L
+    sta temp
+    lda _song_order2L+1
+    sta temp+1
+    lda (temp), y
+    sta patseq+4
+
+    // order2H[patind] -> patseq+5
+    lda _song_order2H
+    sta temp
+    lda _song_order2H+1
+    sta temp+1
+    lda (temp), y
+    sta patseq+5
+
+    ldx temp+2
+    rts
+
+add_arpeff:
+    pha
+    inc arpind, x
+    ldy arpind, x
+    lda arp_mod, y
+    sta arpind, x
+    tay
+    pla
+    cpy #1
+    beq arp1
+    cpy #2
+    beq arp2
+    rts
+arp1:
+    clc
+    adc arpeff1, x
+    rts
+arp2:
+    clc
+    adc arpeff2, x
+    rts
+
+// Increment 16-bit pattern pointer
+// Preserves: A, X, Y
+inc_patzp:
+    inc patzp
+    bne !+
+    inc patzp+1
+!:  rts
+
+// Calculate note pitch for channel X
+// Input: X = channel (0-2)
+// Output: note_pitch_lo[x], note_pitch_hi[x] updated
+// Preserves: X
+calc_ch_pitch:
+    lda absarp, x
+    beq _ccp_rel
+    lda arp, x
+    and #127
+    jmp _ccp_out
+_ccp_rel:
+    lda note_n, x
+    clc
+    adc arp, x
+_ccp_out:
+    jsr add_arpeff
+    jsr clamp_note
+    tay
+    clc
+    lda note_table_lo, y
+    adc slide_buffer_lo, x
+    sta note_pitch_lo, x
+    lda note_table_hi, y
+    adc slide_buffer_hi, x
+    sta note_pitch_hi, x
+    rts
+
+fix_wav_6581:
+    // Fix waveform combinations that don't work on 6581
+    // 6581 ANDs waveforms together → nearly silent for combinations
+    // $30 (tri+saw) → $20 (saw)
+    // $50 (tri+pulse) → $40 (pulse)
+    // $60 (saw+pulse) → $40 (pulse)
+    // $70 (tri+saw+pulse) → $40 (pulse)
+    pha
+    lda is_6581
+    beq _fw_done
+    pla
+    pha
+    and #$70                // Check tri+saw+pulse bits
+    cmp #$30                // tri+saw? ($10+$20)
+    beq _fw_remove_tri_30
+    cmp #$50                // tri+pulse? ($10+$40)
+    beq _fw_remove_tri_50
+    cmp #$60                // saw+pulse? ($20+$40)
+    beq _fw_remove_saw
+    cmp #$70                // tri+saw+pulse? ($10+$20+$40)
+    beq _fw_remove_saw_70
+    // No problematic combination
+    pla
+    rts
+_fw_remove_tri_30:
+    pla
+    and #$ef                // tri+saw → saw ($20) - richer harmonics
+    rts
+_fw_remove_tri_50:
+    pla
+    and #$4f                // tri+pulse → pulse ($40) - Duty controls timbre
+    rts
+_fw_remove_saw_70:
+    pla
+    and #$4f                // tri+saw+pulse → pulse ($40) - Duty controls timbre
+    rts
+_fw_remove_saw:
+    pla
+    and #$df                // saw+pulse → pulse ($40)
+    rts
+_fw_done:
+    pla
+    rts
+
+arp_mod:
+    .byte 0, 1, 2, 0
+
+ch_mul_tabl:
+    .byte 0, 7, 14
+
+clamp_note:
+    bcc _cn_ok
+    lda #95
+_cn_ok:
+    rts
+
+ch_filter_enable:
+    .byte 1, 2, 4
+
+ch_filter_enable_inv:
+    .byte 254, 253, 251
+
+// Vibrato lookup tables (only if USE_VIBRATO is enabled)
+.if (USE_VIBRATO) {
+// Triangle lookup for vibrato (64 bytes)
+triangle_lookup:
+    .byte $00, $08, $10, $18, $20, $28, $30, $38
+    .byte $40, $48, $50, $58, $60, $68, $70, $78
+    .byte $70, $68, $60, $58, $50, $48, $40, $38
+    .byte $30, $28, $20, $18, $10, $08, $00, $08
+    .byte $00, $08, $10, $18, $20, $28, $30, $38
+    .byte $40, $48, $50, $58, $60, $68, $70, $78
+    .byte $70, $68, $60, $58, $50, $48, $40, $38
+    .byte $30, $28, $20, $18, $10, $08, $00, $00
+
+// Vibrato lookup (256 bytes)
+tri_vibrato_lookup:
+    .byte $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80
+    .byte $7C, $7E, $80, $82, $84, $86, $88, $8A, $8C, $8E, $90, $92, $94, $96, $98, $9A
+    .byte $78, $7C, $80, $84, $88, $8C, $90, $94, $98, $9C, $A0, $A4, $A8, $AC, $B0, $B4
+    .byte $74, $7A, $80, $86, $8C, $92, $98, $9E, $A4, $AA, $B0, $B6, $BC, $C2, $C8, $CE
+    .byte $70, $78, $80, $88, $90, $98, $A0, $A8, $B0, $B8, $C0, $C8, $D0, $D8, $E0, $E8
+    .byte $6C, $76, $80, $8A, $94, $9E, $A8, $B2, $BC, $C6, $D0, $DA, $E4, $EE, $F8, $FF
+    .byte $68, $74, $80, $8C, $98, $A4, $B0, $BC, $C8, $D4, $E0, $EC, $F8, $FF, $FF, $FF
+    .byte $64, $72, $80, $8E, $9C, $AA, $B8, $C6, $D4, $E2, $F0, $FE, $FF, $FF, $FF, $FF
+    .byte $60, $70, $80, $90, $A0, $B0, $C0, $D0, $E0, $F0, $FF, $FF, $FF, $FF, $FF, $FF
+    .byte $5C, $6E, $80, $92, $A4, $B6, $C8, $DA, $EC, $FE, $FF, $FF, $FF, $FF, $FF, $FF
+    .byte $58, $6C, $80, $94, $A8, $BC, $D0, $E4, $F8, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+    .byte $54, $6A, $80, $96, $AC, $C2, $D8, $EE, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+    .byte $50, $68, $80, $98, $B0, $C8, $E0, $F8, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+    .byte $4C, $66, $80, $9A, $B4, $CE, $E8, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+    .byte $48, $64, $80, $9C, $B8, $D4, $F0, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+    .byte $44, $62, $80, $9E, $BC, $DA, $F8, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+}
+
+// PAL frequency table (96 notes, A=440Hz tuning)
+// NTSC conversion is done at runtime by the driver
+note_table_lo:
+    .byte $16, $26, $38, $4B, $5E, $73, $89, $A1, $B9, $D4, $F0, $0D, $2C, $4D, $71, $96
+    .byte $BD, $E7, $13, $42, $73, $A8, $E0, $1B, $59, $9B, $E2, $2C, $7B, $CE, $27, $84
+    .byte $E7, $51, $C0, $36, $B3, $37, $C4, $59, $F6, $9D, $4E, $09, $CF, $A2, $81, $6D
+    .byte $67, $6F, $88, $B2, $ED, $3A, $9C, $13, $9F, $44, $02, $DA, $CE, $DF, $11, $64
+    .byte $DA, $75, $38, $26, $3F, $89, $04, $B4, $9C, $BF, $22, $C8, $B4, $EB, $71, $4C
+    .byte $7F, $12, $08, $68, $38, $7F, $45, $90, $68, $D6, $E3, $98, $FF, $24, $10, $FF
+note_table_hi:
+    .byte $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $02, $02, $02, $02, $02
+    .byte $02, $02, $03, $03, $03, $03, $03, $04, $04, $04, $04, $05, $05, $05, $06, $06
+    .byte $06, $07, $07, $08, $08, $09, $09, $0A, $0A, $0B, $0C, $0D, $0D, $0E, $0F, $10
+    .byte $11, $12, $13, $14, $15, $17, $18, $1A, $1B, $1D, $1F, $20, $22, $24, $27, $29
+    .byte $2B, $2E, $31, $34, $37, $3A, $3E, $41, $45, $49, $4E, $52, $57, $5C, $62, $68
+    .byte $6E, $75, $7C, $83, $8B, $93, $9C, $A5, $AF, $B9, $C4, $D0, $DC, $EA, $F8, $FF
+
+// Scale table for pitch slide (only if USE_PORTAMENTO is enabled - 256 bytes)
+.if (USE_PORTAMENTO) {
+scale_table:
+    .byte $FB, $FB
+    .byte $FC, $FC
+    .byte $FD, $FD, $FD, $FD
+    .byte $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE
+    .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+    .byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+    .byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00
+    .byte $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01
+    .byte $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01
+    .byte $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01
+    .byte $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01, $01
+    .byte $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02
+    .byte $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02
+    .byte $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02
+    .byte $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02
+    .byte $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02
+    .byte $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02, $02
+}
+
+_mp_driver_end:
+    """)
+
+
+@naked
+def music_enable_loop():
+    """Enable music looping (default behavior).
+
+    When looping is enabled, the song will repeat forever.
+    This is the default mode after music_init().
+    """
+    __asm__("""
+    lda #1
+    jmp _mp_set_loop
+    """)
+
+
+@naked
+def music_disable_loop():
+    """Disable music looping - play song only once.
+
+    When looping is disabled, the music will stop after playing once
+    and music_is_ended() will return 1.
+
+    Call this AFTER initializing the song.
+    """
+    __asm__("""
+    lda #0
+    jmp _mp_set_loop
+    """)
+
+
+@naked
+def music_tick():
+    """Play one tick of music. Call this from your IRQ handler.
+
+    This advances the music playback by one tick. Should be called
+    at the song's tempo rate (typically 50Hz for PAL or 60Hz for CIA).
+    """
+    __asm__("""
+    jmp _mp_play
+    """)
+
+
+@naked
+def music_stop():
+    """Stop music playback immediately and silence the SID.
+
+    After stopping:
+    - music_is_stopped() returns non-zero
+    - music_tick() becomes a no-op (returns immediately)
+    - Call music_continue() to resume, or music_init() to restart
+    """
+    __asm__("""
+    jmp _mp_stop
+    """)
+
+
+@naked
+def music_is_stopped() -> byte:
+    """Check if music playback is stopped.
+
+    Returns:
+        Non-zero if music is stopped (paused or ended), 0 if playing
+
+    Use this in your main loop to detect when music has been stopped.
+    """
+    __asm__("""
+    lda music_state
+    """)
+
+
+@naked
+def music_continue():
+    """Continue music playback after stop.
+
+    Resumes playback from where it was stopped.
+    If music ended naturally, it stays at the end (silent).
+    To restart from beginning, use music_init() instead.
+    """
+    __asm__("""
+    jmp _mp_continue
+    """)
+
+
+@naked
+def music_is_6581() -> byte:
+    """Check if 6581 SID chip was detected.
+
+    Returns:
+        1 if 6581, 0 if 8580
+    """
+    __asm__("""
+    lda is_6581
+    """)
+
+
+@naked
+def music_disable_ch(ch: byte):
+    """Disable music output on a channel, freeing it for SFX.
+
+    Args:
+        ch: Channel number (0, 1, or 2)
+
+    After calling this, the music driver will NOT write to this channel's
+    SID registers, allowing you to use it for sound effects.
+
+    Example:
+        music_disable_ch(2)        # Reserve channel 2 for SFX
+        sfx_shoot()                # Play effect on channel 2
+        music_enable_ch(2)         # Return channel to music
+    """
+    __asm__("""
+    // A = channel (0-2)
+    tax
+    lda channel_bit_mask, x
+    eor #$ff                      // Invert: bit to clear
+    and channel_enabled           // Clear the bit
+    sta channel_enabled
+    """)
+
+
+@naked
+def music_enable_ch(ch: byte):
+    """Re-enable music output on a channel.
+
+    Args:
+        ch: Channel number (0, 1, or 2)
+
+    After calling this, the music driver will resume writing to this
+    channel's SID registers. Call this when done with SFX.
+    """
+    __asm__("""
+    // A = channel (0-2)
+    tax
+    lda channel_bit_mask, x
+    ora channel_enabled           // Set the bit
+    sta channel_enabled
+    """)
+
+
+@naked
+def music_enable_all_ch():
+    """Re-enable all channels for music playback.
+
+    Call this after music_init() if you previously disabled channels
+    and want to restore all of them for the new song.
+
+    Example:
+        music_disable_ch(2)        # Reserve channel 2 for SFX
+        # ... play SFX ...
+        new_song_init()            # Start new song
+        music_enable_all_ch()      # Restore all channels
+    """
+    __asm__("""
+    lda #7
+    sta channel_enabled
+    """)
+
+
+@naked
+def music_set_volume(vol: byte):
+    """Set the master volume limit (0-15).
+
+    Args:
+        vol: Volume level (0 = silent, 15 = full volume)
+
+    The music's volume will be limited to this value. If the song's
+    volume is lower, it stays lower (preserving dynamics). If higher,
+    it's capped at this limit.
+
+    Example:
+        music_set_volume(15)       # Full volume (default)
+        music_set_volume(8)        # Half volume
+        music_set_volume(0)        # Mute (but music keeps playing)
+    """
+    __asm__("""
+    // A = volume (0-15)
+    and #$0f                // Ensure 0-15 range
+    sta master_volume
+    sta fade_saved_vol      // Also update saved volume
+    // If music stopped, update $D418 immediately (tick won't run)
+    ldx music_state
+    beq _msv_done           // If playing (0), tick will update $D418
+    sta SID+$18             // If stopped, update now (filter mode = 0)
+_msv_done:
+    """)
+
+
+@naked
+def music_stop_fade(tenths: byte):
+    """Stop music with a fade out effect.
+
+    Args:
+        tenths: Fade duration in tenths of a second (1-25).
+                1 = 0.1 sec (very fast), 10 = 1 sec, 25 = 2.5 sec
+
+    The volume will gradually decrease to 0, then the music stops.
+    During fade, music_is_stopped() returns 0 (still playing).
+    After fade completes, music_is_stopped() returns non-zero.
+
+    Example:
+        music_stop_fade(10)        # 1 second fade out
+        music_stop_fade(5)         # 0.5 second fade out
+    """
+    __asm__("""
+    // A = duration in tenths of a second (1-25)
+    cmp #26
+    bcc _msf_ok
+    lda #25                   // Clamp to max 25
+_msf_ok:
+    tax
+    // Select 50Hz or 60Hz table based on init_mode and PAL/NTSC
+    // CIA mode (init_mode=1) → always 60Hz
+    // VIC mode (init_mode=0) + NTSC (ntsc_converted=1) → 60Hz
+    // VIC mode (init_mode=0) + PAL (ntsc_converted=0) → 50Hz
+    lda init_mode
+    bne _msf_60hz             // CIA mode → 60Hz
+    lda ntsc_converted
+    bne _msf_60hz             // NTSC → 60Hz
+    // PAL 50Hz
+    lda fade_speed_50hz, x
+    jmp _msf_set
+_msf_60hz:
+    lda fade_speed_60hz, x
+_msf_set:
+    sta fade_speed
+    sta fade_counter          // Initialize counter
+    lda master_volume
+    sta fade_saved_vol        // Save current volume before fade
+    lda #1
+    sta fade_active           // Start fade
+    """)
+
+
+@naked
+def music_stop_pattern_end():
+    """Request music to stop after the current pattern ends.
+
+    Instead of stopping immediately, the music will continue playing
+    until the current pattern ends, then stop gracefully.
+
+    This creates smoother transitions in games where you want the music
+    to fade out naturally rather than cut off mid-phrase.
+
+    After stopping, you can:
+    - Call music_continue() to resume from where it stopped
+    - Call music_init() to restart from the beginning
+    """
+    __asm__("""
+    lda #1
+    sta stop_at_pattern_end
+    """)

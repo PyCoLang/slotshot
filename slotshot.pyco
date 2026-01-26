@@ -8,8 +8,9 @@
 # - IRQ-driven sprite movement for smooth cannon and bullet animation
 # - Shared ZP variables between main loop and IRQ handler
 
-# Include RLE decompressor, image data
-include("rle")
+from compress import rle_decompress
+
+# Include RLE compressed image data
 include("slotshot_image_rle")
 # CRITICAL: Song BEFORE musicplayer for feature-based DCE!
 include("slotshot_music")
@@ -2872,7 +2873,6 @@ class Game:
 
     def __init__():
         # Timer ZP variables (must be initialized before IRQ starts!)
-        frame_counter: byte[ZP_FRAME_COUNTER]
         game_seconds: word[ZP_GAME_SECONDS] = 0
         jiffy_lo: byte[JIFFY_LO_ADDR]
 
