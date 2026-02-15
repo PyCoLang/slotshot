@@ -29,6 +29,9 @@ USAGE:
 """
 
 
+
+
+@keep
 @naked
 def _slotshot_highscore_setup_pointers():
     """Set up song data pointers (shared by both init functions)."""
@@ -187,6 +190,7 @@ def _slotshot_highscore_setup_pointers():
     """)
 
 
+
 @naked
 def slotshot_highscore_music_init():
     """Initialize song for 60Hz playback (CIA timer IRQ)."""
@@ -194,6 +198,7 @@ def slotshot_highscore_music_init():
     jsr __F__slotshot_highscore_setup_pointers
     jmp _mp_init_cia
     """)
+
 
 
 @naked
@@ -205,6 +210,9 @@ def slotshot_highscore_music_vic_init():
     """)
 
 
+
+
+@keep
 @naked
 def _slotshot_highscore_song_data():
     """Song data for slotshot_highscore. Driver is in musicplayer.pyco."""

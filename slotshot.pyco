@@ -878,7 +878,7 @@ def irq_handler(vic: byte, cia1: byte):
         # Acknowledge VIC interrupt
         vic = 0x01
 
-        if raster >= IRQ_RASTER_MUSIC and raster <= IRQ_RASTER_PLAY_AREA_BOTTOM:
+        if raster >= IRQ_RASTER_MUSIC and raster < IRQ_RASTER_PLAY_AREA_BOTTOM:
             raster = IRQ_RASTER_PLAY_AREA_BOTTOM
             music_tick()
             return
@@ -1162,7 +1162,7 @@ def irq_screen_handler(vic: byte, cia1: byte):
 class Screen:
     """ Screen class for hardware access """
     screen: array[byte, 1000][SCREEN] = [0]
-    colors: array[byte, 1000][COLOR] = [COLOR_BLACK]
+    colors: array[byte, 1000][COLOR] = [BLACK]
     border: byte[BORDER]
     background: byte[BACKGROUND]
     # ECM background colors

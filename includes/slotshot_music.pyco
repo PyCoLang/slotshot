@@ -29,6 +29,8 @@ USAGE:
 """
 
 
+
+@keep
 @naked
 def _slotshot_setup_pointers():
     """Set up song data pointers (shared by both init functions)."""
@@ -205,6 +207,8 @@ def slotshot_music_vic_init():
     """)
 
 
+
+@keep
 @naked
 def _slotshot_song_data():
     """Song data for slotshot. Driver is in musicplayer.pyco."""

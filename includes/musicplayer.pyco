@@ -58,6 +58,8 @@ FUNCTIONS:
 """
 
 
+
+@keep
 @naked
 def _musicplayer_driver():
     """Music player driver code. Called automatically when included."""
